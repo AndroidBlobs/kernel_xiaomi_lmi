@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
- * Copyright (c) 2018-2020, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2018-2019, The Linux Foundation. All rights reserved.
+ * Copyright (C) 2020 XiaoMi, Inc.
  */
 
 /* -------------------------------------------------------------------------
@@ -1584,9 +1585,8 @@ static int npu_parse_dt_clock(struct npu_device *npu_dev)
 			sizeof(core_clks[i].clk_name));
 		core_clks[i].clk = devm_clk_get(&pdev->dev, clock_name);
 		if (IS_ERR(core_clks[i].clk)) {
-			if (PTR_ERR(core_clks[i].clk) != -EPROBE_DEFER)
-				NPU_ERR("unable to get clk: %s\n", clock_name);
-			rc = PTR_ERR(core_clks[i].clk);
+			NPU_ERR("unable to get clk: %s\n", clock_name);
+			rc = -EINVAL;
 			break;
 		}
 
@@ -1647,15 +1647,15 @@ regulator_err:
 
 static int npu_parse_dt_bw(struct npu_device *npu_dev)
 {
-	int ret, len, num_paths, i;
-	uint32_t ports[MAX_PATHS * 2];
+    int ret, len, num_paths, i;
+    uint32_t ports[MAX_PATHS * 2];
 	struct platform_device *pdev = npu_dev->pdev;
 	struct npu_bwctrl *bwctrl = &npu_dev->bwctrl;
 
 	if (of_find_property(pdev->dev.of_node, "qcom,src-dst-ports", &len)) {
 		len /= sizeof(ports[0]);
-		if (len % 2 || len > ARRAY_SIZE(ports)) {
-			NPU_ERR("Unexpected number of ports %d\n", len);
+        if (len % 2 || len > ARRAY_SIZE(ports)) {
+            NPU_ERR("Unexpected number of ports %d\n", len);
 			return -EINVAL;
 		}
 
@@ -1679,10 +1679,10 @@ static int npu_parse_dt_bw(struct npu_device *npu_dev)
 	bwctrl->bw_data.active_only = false;
 
 	for (i = 0; i < num_paths; i++) {
-		bwctrl->bw_levels[0].vectors[i].src = ports[2 * i];
-		bwctrl->bw_levels[0].vectors[i].dst = ports[2 * i + 1];
-		bwctrl->bw_levels[1].vectors[i].src = ports[2 * i];
-		bwctrl->bw_levels[1].vectors[i].dst = ports[2 * i + 1];
+			bwctrl->bw_levels[0].vectors[i].src = ports[2 * i];
+			bwctrl->bw_levels[0].vectors[i].dst = ports[2 * i + 1];
+			bwctrl->bw_levels[1].vectors[i].src = ports[2 * i];
+			bwctrl->bw_levels[1].vectors[i].dst = ports[2 * i + 1];
 	}
 	bwctrl->bw_levels[0].num_paths = num_paths;
 	bwctrl->bw_levels[1].num_paths = num_paths;
@@ -1701,7 +1701,7 @@ static int npu_parse_dt_bw(struct npu_device *npu_dev)
 
 int npu_set_bw(struct npu_device *npu_dev, int new_ib, int new_ab)
 {
-	int i, j, ret;
+	int i,j,ret;
 	struct npu_bwctrl *bwctrl = &npu_dev->bwctrl;
 
 	if (!bwctrl->bus_client) {
@@ -1716,13 +1716,13 @@ int npu_set_bw(struct npu_device *npu_dev, int new_ib, int new_ab)
 
 	for (j = 0; j < bwctrl->num_paths; j++) {
 		if ((bwctrl->bw_levels[i].vectors[j].dst ==
-			MSM_BUS_SLAVE_CLK_CTL) && (new_ib > 0)) {
+					MSM_BUS_SLAVE_CLK_CTL) && (new_ib > 0)) {
 			bwctrl->bw_levels[i].vectors[j].ib = 1;
 			bwctrl->bw_levels[i].vectors[j].ab = 1;
 		} else {
 			bwctrl->bw_levels[i].vectors[j].ib = new_ib * MBYTE;
 			bwctrl->bw_levels[i].vectors[j].ab =
-				new_ab * MBYTE / bwctrl->num_paths;
+			new_ab * MBYTE / bwctrl->num_paths;
 		}
 	}
 
@@ -1738,70 +1738,13 @@ int npu_set_bw(struct npu_device *npu_dev, int new_ib, int new_ab)
 	return ret;
 }
 
-#define NPU_FMAX_THRESHOLD 1000000
-static int npu_adjust_max_power_level(struct npu_device *npu_dev)
-{
-	struct npu_pwrctrl *pwr = &npu_dev->pwrctrl;
-	uint32_t fmax_reg_value, fmax, fmax_pwrlvl;
-	struct npu_pwrlevel *level;
-	int i, j;
-
-	if (!npu_dev->qfprom_io.base)
-		return 0;
-
-	/* search for cal clock index */
-	for (j = 0; j < npu_dev->core_clk_num; j++) {
-		if (!strcmp(npu_dev->core_clks[j].clk_name,
-			"cal_hm0_clk"))
-			break;
-	}
-
-	if (j == npu_dev->core_clk_num) {
-		NPU_WARN("can't find clock cal_hm0_clk\n");
-		return 0;
-	}
-
-	/* Read FMAX info if available */
-	fmax_reg_value = (npu_qfprom_reg_read(npu_dev,
-		QFPROM_FMAX_REG_OFFSET) & QFPROM_FMAX_BITS_MASK) >>
-		QFPROM_FMAX_BITS_SHIFT;
-	NPU_DBG("fmax_reg_value %x\n", fmax_reg_value);
-
-	if (fmax_reg_value == 0)
-		return 0;
-
-	/* calculate fmax and truncate to MHz */
-	fmax = fmax_reg_value * 19200000 / 2;
-
-	/* search for the nearest power level */
-	for (i = 0; i < pwr->num_pwrlevels; i++) {
-		level = &pwr->pwrlevels[i];
-
-		if (level->clk_freq[j] >= fmax ||
-			((fmax - level->clk_freq[j]) < NPU_FMAX_THRESHOLD)) {
-			fmax_pwrlvl = level->pwr_level;
-			break;
-		}
-	}
-
-	if (i == pwr->num_pwrlevels)
-		return 0;
-
-	if (fmax_pwrlvl < pwr->max_pwrlevel) {
-		pwr->max_pwrlevel = fmax_pwrlvl;
-		NPU_INFO("Adjust max_pwrlevel to %d[%x]\n", fmax_pwrlvl,
-			fmax_reg_value);
-	}
-
-	return 0;
-}
-
 static int npu_of_parse_pwrlevels(struct npu_device *npu_dev,
 		struct device_node *node)
 {
 	struct npu_pwrctrl *pwr = &npu_dev->pwrctrl;
 	struct device_node *child;
 	uint32_t init_level_index = 0, init_power_level;
+	uint32_t fmax, fmax_pwrlvl;
 
 	pwr->num_pwrlevels = 0;
 	pwr->min_pwrlevel = NPU_PWRLEVEL_TURBO_L1;
@@ -1862,7 +1805,29 @@ static int npu_of_parse_pwrlevels(struct npu_device *npu_dev,
 		}
 	}
 
-	npu_adjust_max_power_level(npu_dev);
+	/* Read FMAX info if available */
+	if (npu_dev->qfprom_io.base) {
+		fmax = (npu_qfprom_reg_read(npu_dev,
+			QFPROM_FMAX_REG_OFFSET) & QFPROM_FMAX_BITS_MASK) >>
+			QFPROM_FMAX_BITS_SHIFT;
+		NPU_DBG("fmax %x\n", fmax);
+
+		switch (fmax) {
+		case 1:
+		case 2:
+			fmax_pwrlvl = NPU_PWRLEVEL_NOM;
+			break;
+		case 3:
+			fmax_pwrlvl = NPU_PWRLEVEL_SVS_L1;
+			break;
+		default:
+			fmax_pwrlvl = pwr->max_pwrlevel;
+			break;
+		}
+
+		if (fmax_pwrlvl < pwr->max_pwrlevel)
+			pwr->max_pwrlevel = fmax_pwrlvl;
+	}
 
 	of_property_read_u32(node, "initial-pwrlevel", &init_level_index);
 	NPU_DBG("initial-pwrlevel %d\n", init_level_index);
@@ -1896,8 +1861,6 @@ static int npu_pwrctrl_init(struct npu_device *npu_dev)
 	struct platform_device *p2dev;
 	struct npu_pwrctrl *pwr = &npu_dev->pwrctrl;
 
-	pwr->devbw_num = 0;
-
 	/* Power levels */
 	node = of_find_node_by_name(pdev->dev.of_node, "qcom,npu-pwrlevels");
 
@@ -1911,17 +1874,15 @@ static int npu_pwrctrl_init(struct npu_device *npu_dev)
 		return ret;
 
 	/* Parse Bandwidth Monitor */
-	ret = of_property_count_strings(pdev->dev.of_node,
+	pwr->devbw_num = of_property_count_strings(pdev->dev.of_node,
 			"qcom,npubw-dev-names");
-	if (ret <= 0) {
+	if (pwr->devbw_num <= 0) {
 		NPU_INFO("npubw-dev-names are not defined\n");
 		return 0;
-	} else if (ret > NPU_MAX_BW_DEVS) {
-		NPU_ERR("number of devbw %d exceeds limit\n", ret);
+	} else if (pwr->devbw_num > NPU_MAX_BW_DEVS) {
+		NPU_ERR("number of devbw %d exceeds limit\n", pwr->devbw_num);
 		return -EINVAL;
 	}
-	pwr->devbw_num = ret;
-	ret = 0;
 
 	for (i = 0; i < pwr->devbw_num; i++) {
 		node = of_parse_phandle(pdev->dev.of_node,

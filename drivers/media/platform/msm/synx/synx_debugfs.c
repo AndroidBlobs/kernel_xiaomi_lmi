@@ -74,7 +74,7 @@ static ssize_t synx_table_read(struct file *file,
 		if (!row->index)
 			continue;
 
-		mutex_lock(&dev->row_locks[row->index]);
+		spin_lock_bh(&dev->row_spinlocks[row->index]);
 		if (columns & NAME_COLUMN)
 			cur += scnprintf(cur, end - cur,
 				"|%10s|", row->name);
@@ -82,7 +82,7 @@ static ssize_t synx_table_read(struct file *file,
 			cur += scnprintf(cur, end - cur,
 				"|%11d|", row->num_bound_synxs);
 		if (columns & STATE_COLUMN) {
-			state = synx_status(row);
+			state = synx_status_locked(row);
 			cur += scnprintf(cur, end - cur,
 				"|%10d|", state);
 		}
@@ -101,7 +101,7 @@ static ssize_t synx_table_read(struct file *file,
 					"|0x%8x|", obj_node->synx_obj);
 				}
 		}
-		mutex_unlock(&dev->row_locks[row->index]);
+		spin_unlock_bh(&dev->row_spinlocks[row->index]);
 		cur += scnprintf(cur, end - cur, "\n");
 	}
 	if (columns & ERROR_CODES && !list_empty(

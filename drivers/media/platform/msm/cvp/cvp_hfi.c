@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
- * Copyright (c) 2018-2020, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2018-2019, The Linux Foundation. All rights reserved.
+ * Copyright (C) 2020 XiaoMi, Inc.
  */
 
 #include <asm/dma-iommu.h>
@@ -37,7 +38,6 @@
 #define FIRMWARE_SIZE			0X00A00000
 #define REG_ADDR_OFFSET_BITMASK	0x000FFFFF
 #define QDSS_IOVA_START 0x80001000
-#define MIN_PAYLOAD_SIZE 3
 
 const struct msm_cvp_hfi_defs cvp_hfi_defs[] = {
 	{
@@ -826,17 +826,13 @@ static int __read_queue(struct cvp_iface_q_info *qinfo, u8 *packet,
 		 */
 		mb();
 		*pb_tx_req_is_set = 0;
-		if (write_idx != queue->qhdr_write_idx) {
-			queue->qhdr_rx_req = 0;
-		} else {
-			spin_unlock(&qinfo->hfi_lock);
-			dprintk(CVP_DBG,
-				"%s queue is empty, rx_req = %u, tx_req = %u, read_idx = %u\n",
-				receive_request ? "message" : "debug",
-				queue->qhdr_rx_req, queue->qhdr_tx_req,
-				queue->qhdr_read_idx);
-			return -ENODATA;
-		}
+		spin_unlock(&qinfo->hfi_lock);
+		dprintk(CVP_DBG,
+			"%s queue is empty, rx_req = %u, tx_req = %u, read_idx = %u\n",
+			receive_request ? "message" : "debug",
+			queue->qhdr_rx_req, queue->qhdr_tx_req,
+			queue->qhdr_read_idx);
+		return -ENODATA;
 	}
 
 	read_ptr = (u32 *)((qinfo->q_array.align_virtual_addr) +
@@ -880,7 +876,7 @@ static int __read_queue(struct cvp_iface_q_info *qinfo, u8 *packet,
 		rc = -ENODATA;
 	}
 
-	if (new_read_idx != queue->qhdr_write_idx)
+	if (read_idx != write_idx)
 		queue->qhdr_rx_req = 0;
 	else
 		queue->qhdr_rx_req = receive_request;
@@ -2353,6 +2349,34 @@ static int iris_hfi_core_release(void *dev)
 	return rc;
 }
 
+static int __get_q_size(struct iris_hfi_device *dev, unsigned int q_index)
+{
+	struct cvp_hfi_queue_header *queue;
+	struct cvp_iface_q_info *q_info;
+	u32 write_ptr, read_ptr;
+
+	if (q_index >= CVP_IFACEQ_NUMQ) {
+		dprintk(CVP_ERR, "Invalid q index: %d\n", q_index);
+		return -ENOENT;
+	}
+
+	q_info = &dev->iface_queues[q_index];
+	if (!q_info) {
+		dprintk(CVP_ERR, "cannot read shared Q's\n");
+		return -ENOENT;
+	}
+
+	queue = (struct cvp_hfi_queue_header *)q_info->q_hdr;
+	if (!queue) {
+		dprintk(CVP_ERR, "queue not present\n");
+		return -ENOENT;
+	}
+
+	write_ptr = (u32)queue->qhdr_write_idx;
+	read_ptr = (u32)queue->qhdr_read_idx;
+	return read_ptr - write_ptr;
+}
+
 static void __core_clear_interrupt(struct iris_hfi_device *device)
 {
 	u32 intr_status = 0, mask = 0;
@@ -2934,26 +2958,20 @@ skip_power_off:
 	return -EAGAIN;
 }
 
-static void print_sfr_message(struct iris_hfi_device *device)
+static void __process_sys_error(struct iris_hfi_device *device)
 {
 	struct cvp_hfi_sfr_struct *vsfr = NULL;
-	u32 vsfr_size = 0;
-	void *p = NULL;
 
 	vsfr = (struct cvp_hfi_sfr_struct *)device->sfr.align_virtual_addr;
 	if (vsfr) {
-		if (vsfr->bufSize != device->sfr.mem_size) {
-			dprintk(CVP_ERR, "Invalid SFR buf size %d actual %d\n",
-			vsfr->bufSize, device->sfr.mem_size);
-			return;
-		}
-		vsfr_size = vsfr->bufSize - sizeof(u32);
-		p = memchr(vsfr->rg_data, '\0', vsfr_size);
+		void *p = memchr(vsfr->rg_data, '\0', vsfr->bufSize);
 		/*
 		 * SFR isn't guaranteed to be NULL terminated
+		 * since SYS_ERROR indicates that Iris is in the
+		 * process of crashing.
 		 */
 		if (p == NULL)
-			vsfr->rg_data[vsfr_size - 1] = '\0';
+			vsfr->rg_data[vsfr->bufSize - 1] = '\0';
 
 		dprintk(CVP_ERR, "SFR Message from FW: %s\n",
 				vsfr->rg_data);
@@ -2988,35 +3006,22 @@ static void __flush_debug_queue(struct iris_hfi_device *device, u8 *packet)
 		log_level = CVP_ERR;
 	}
 
-#define SKIP_INVALID_PKT(pkt_size, payload_size, pkt_hdr_size) ({ \
-		if (pkt_size < pkt_hdr_size || \
-			payload_size < MIN_PAYLOAD_SIZE || \
-			payload_size > \
-			(pkt_size - pkt_hdr_size + sizeof(u8))) { \
-			dprintk(CVP_ERR, \
-				"%s: invalid msg size - %d\n", \
-				__func__, pkt->msg_size); \
-			continue; \
-		} \
-	})
-
 	while (!__iface_dbgq_read(device, packet)) {
-		struct cvp_hfi_packet_header *pkt =
-			(struct cvp_hfi_packet_header *) packet;
+		struct cvp_hfi_msg_sys_coverage_packet *pkt =
+			(struct cvp_hfi_msg_sys_coverage_packet *) packet;
 
-		if (pkt->size < sizeof(struct cvp_hfi_packet_header)) {
-			dprintk(CVP_ERR, "Invalid pkt size - %s\n",
-				__func__);
-			continue;
-		}
+		if (pkt->packet_type == HFI_MSG_SYS_COV) {
+			int stm_size = 0;
 
-		if (pkt->packet_type == HFI_MSG_SYS_DEBUG) {
+			stm_size = stm_log_inv_ts(0, 0,
+				pkt->rg_msg_data, pkt->msg_size);
+			if (stm_size == 0)
+				dprintk(CVP_ERR,
+					"In %s, stm_log returned size of 0\n",
+					__func__);
+		} else {
 			struct cvp_hfi_msg_sys_debug_packet *pkt =
 				(struct cvp_hfi_msg_sys_debug_packet *) packet;
-
-			SKIP_INVALID_PKT(pkt->size,
-				pkt->msg_size, sizeof(*pkt));
-
 			/*
 			 * All fw messages starts with new line character. This
 			 * causes dprintk to print this message in two lines
@@ -3024,11 +3029,9 @@ static void __flush_debug_queue(struct iris_hfi_device *device, u8 *packet)
 			 * from the message fixes this to print it in a single
 			 * line.
 			 */
-			pkt->rg_msg_data[pkt->msg_size-1] = '\0';
 			dprintk(log_level, "%s", &pkt->rg_msg_data[1]);
 		}
 	}
-#undef SKIP_INVALID_PKT
 
 	if (local_packet)
 		kfree(packet);
@@ -3077,7 +3080,7 @@ static void process_system_msg(struct msm_cvp_cb_info *info,
 
 	switch (info->response_type) {
 	case HAL_SYS_ERROR:
-		print_sfr_message(device);
+		__process_sys_error(device);
 		break;
 	case HAL_SYS_RELEASE_RESOURCE_DONE:
 		dprintk(CVP_DBG, "Received SYS_RELEASE_RESOURCE\n");
@@ -3204,6 +3207,8 @@ static int __response_handler(struct iris_hfi_device *device)
 	}
 
 	if (device->intr_status & CVP_FATAL_INTR_BMSK) {
+		struct cvp_hfi_sfr_struct *vsfr = (struct cvp_hfi_sfr_struct *)
+			device->sfr.align_virtual_addr;
 		struct msm_cvp_cb_info info = {
 			.response_type = HAL_SYS_WATCHDOG_TIMEOUT,
 			.response.cmd = {
@@ -3211,8 +3216,9 @@ static int __response_handler(struct iris_hfi_device *device)
 			}
 		};
 
-		print_sfr_message(device);
-
+		if (vsfr)
+			dprintk(CVP_ERR, "SFR Message from FW: %s\n",
+					vsfr->rg_data);
 		if (device->intr_status & CVP_WRAPPER_INTR_MASK_CPU_NOC_BMSK)
 			dprintk(CVP_ERR, "Received Xtensa NOC error\n");
 
@@ -3279,7 +3285,8 @@ static int __response_handler(struct iris_hfi_device *device)
 			*session_id = session->session_id;
 		}
 
-		if (packet_count >= cvp_max_packets) {
+		if (packet_count >= cvp_max_packets &&
+				__get_q_size(device, CVP_IFACEQ_MSGQ_IDX)) {
 			dprintk(CVP_WARN,
 				"Too many packets in message queue!\n");
 			break;

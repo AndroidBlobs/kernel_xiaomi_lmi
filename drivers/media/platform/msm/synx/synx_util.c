@@ -30,7 +30,6 @@ int synx_init_object(struct synx_table_row *table,
 	struct dma_fence_ops *ops)
 {
 	struct dma_fence *fence = NULL;
-	spinlock_t *spinlock = NULL;
 	struct synx_table_row *row = table + idx;
 	struct synx_obj_node *obj_node;
 
@@ -41,26 +40,17 @@ int synx_init_object(struct synx_table_row *table,
 	if (!fence)
 		return -ENOMEM;
 
-	spinlock = kzalloc(sizeof(*spinlock), GFP_KERNEL);
-	if (!spinlock) {
-		kfree(fence);
-		return -ENOMEM;
-	}
-
-	spin_lock_init(spinlock);
-
 	obj_node = kzalloc(sizeof(*obj_node), GFP_KERNEL);
 	if (!obj_node) {
-		kfree(spinlock);
 		kfree(fence);
 		return -ENOMEM;
 	}
 
-	dma_fence_init(fence, ops, spinlock, synx_dev->dma_context, 1);
+	dma_fence_init(fence, ops, &synx_dev->row_spinlocks[idx],
+		synx_dev->dma_context, 1);
 
-	mutex_lock(&synx_dev->row_locks[idx]);
+	spin_lock_bh(&synx_dev->row_spinlocks[idx]);
 	row->fence = fence;
-	row->spinlock = spinlock;
 	obj_node->synx_obj = id;
 	row->index = idx;
 	INIT_LIST_HEAD(&row->synx_obj_list);
@@ -70,10 +60,10 @@ int synx_init_object(struct synx_table_row *table,
 	list_add(&obj_node->list, &row->synx_obj_list);
 	if (name)
 		strlcpy(row->name, name, sizeof(row->name));
-	mutex_unlock(&synx_dev->row_locks[idx]);
+	spin_unlock_bh(&synx_dev->row_spinlocks[idx]);
 
 	pr_debug("synx obj init: id:0x%x state:%u fence: 0x%pK\n",
-		synx_status(row), fence);
+		synx_status_locked(row), fence);
 
 	return 0;
 }
@@ -97,7 +87,7 @@ int synx_init_group_object(struct synx_table_row *table,
 	if (!obj_node)
 		return -ENOMEM;
 
-	mutex_lock(&synx_dev->row_locks[idx]);
+	spin_lock_bh(&synx_dev->row_spinlocks[idx]);
 	row->fence = &array->base;
 	obj_node->synx_obj = id;
 	row->index = idx;
@@ -106,10 +96,10 @@ int synx_init_group_object(struct synx_table_row *table,
 	INIT_LIST_HEAD(&row->user_payload_list);
 
 	list_add(&obj_node->list, &row->synx_obj_list);
-	mutex_unlock(&synx_dev->row_locks[idx]);
+	spin_unlock_bh(&synx_dev->row_spinlocks[idx]);
 
 	pr_debug("synx group obj init: id:%d state:%u fence: 0x%pK\n",
-		id, synx_status(row), row->fence);
+		id, synx_status_locked(row), row->fence);
 
 	return 0;
 }
@@ -124,7 +114,7 @@ void synx_callback_dispatch(struct synx_table_row *row)
 	if (!row)
 		return;
 
-	state = synx_status(row);
+	state = synx_status_locked(row);
 
 	/* dispatch the kernel callbacks registered (if any) */
 	list_for_each_entry_safe(synx_cb,
@@ -145,9 +135,9 @@ void synx_callback_dispatch(struct synx_table_row *row)
 			pr_err("invalid client member in cb list\n");
 			continue;
 		}
-		mutex_lock(&client->eventq_lock);
+		spin_lock_bh(&client->eventq_lock);
 		list_move_tail(&payload_info->list, &client->eventq);
-		mutex_unlock(&client->eventq_lock);
+		spin_unlock_bh(&client->eventq_lock);
 		/*
 		 * since cb can be registered by multiple clients,
 		 * wake the process right away
@@ -175,20 +165,19 @@ int synx_deinit_object(struct synx_table_row *row)
 	struct synx_callback_info *synx_cb, *temp_cb;
 	struct synx_cb_data  *upayload_info, *temp_upayload;
 	struct synx_obj_node *obj_node, *temp_obj_node;
-	unsigned long flags;
 
 	if (!row || !synx_dev)
 		return -EINVAL;
 
 	index = row->index;
-	spin_lock_irqsave(&synx_dev->idr_lock, flags);
+	spin_lock_bh(&synx_dev->idr_lock);
 	list_for_each_entry_safe(obj_node,
 		temp_obj_node, &row->synx_obj_list, list) {
 		if ((struct synx_table_row *)idr_remove(&synx_dev->synx_ids,
 				obj_node->synx_obj) != row) {
 			pr_err("removing data in idr table failed 0x%x\n",
 				obj_node->synx_obj);
-			spin_unlock_irqrestore(&synx_dev->idr_lock, flags);
+			spin_unlock_bh(&synx_dev->idr_lock);
 			return -EINVAL;
 		}
 		pr_debug("removed synx obj at 0x%x successful\n",
@@ -196,7 +185,7 @@ int synx_deinit_object(struct synx_table_row *row)
 		list_del_init(&obj_node->list);
 		kfree(obj_node);
 	}
-	spin_unlock_irqrestore(&synx_dev->idr_lock, flags);
+	spin_unlock_bh(&synx_dev->idr_lock);
 
 	/*
 	 * release the fence memory only for individual obj.
@@ -204,7 +193,6 @@ int synx_deinit_object(struct synx_table_row *row)
 	 * in its registered release function.
 	 */
 	if (!is_merged_synx(row)) {
-		kfree(row->spinlock);
 		kfree(row->fence);
 
 		/*
@@ -224,9 +212,9 @@ int synx_deinit_object(struct synx_table_row *row)
 				pr_err("invalid client member in cb list\n");
 				continue;
 			}
-			mutex_lock(&client->eventq_lock);
+			spin_lock_bh(&client->eventq_lock);
 			list_move_tail(&upayload_info->list, &client->eventq);
-			mutex_unlock(&client->eventq_lock);
+			spin_unlock_bh(&client->eventq_lock);
 			/*
 			 * since cb can be registered by multiple clients,
 			 * wake the process right away
@@ -245,8 +233,8 @@ int synx_deinit_object(struct synx_table_row *row)
 		}
 	}
 
+	clear_bit(row->index, synx_dev->bitmap);
 	memset(row, 0, sizeof(*row));
-	clear_bit(index, synx_dev->bitmap);
 
 	pr_debug("destroying synx obj at %d successful\n", index);
 	return 0;
@@ -355,9 +343,9 @@ s32 synx_merge_error(s32 *synx_objs, u32 num_objs)
 			return -EINVAL;
 		}
 
-		mutex_lock(&synx_dev->row_locks[row->index]);
+		spin_lock_bh(&synx_dev->row_spinlocks[row->index]);
 		synx_release_reference(row->fence);
-		mutex_unlock(&synx_dev->row_locks[row->index]);
+		spin_unlock_bh(&synx_dev->row_spinlocks[row->index]);
 	}
 
 	return 0;
@@ -386,9 +374,9 @@ int synx_util_validate_merge(s32 *synx_objs,
 			return -EINVAL;
 		}
 
-		mutex_lock(&synx_dev->row_locks[row->index]);
+		spin_lock_bh(&synx_dev->row_spinlocks[row->index]);
 		count += synx_add_reference(row->fence);
-		mutex_unlock(&synx_dev->row_locks[row->index]);
+		spin_unlock_bh(&synx_dev->row_spinlocks[row->index]);
 	}
 
 	fences = kcalloc(count, sizeof(*fences), GFP_KERNEL);
@@ -407,9 +395,9 @@ int synx_util_validate_merge(s32 *synx_objs,
 			return -EINVAL;
 		}
 
-		mutex_lock(&synx_dev->row_locks[row->index]);
+		spin_lock_bh(&synx_dev->row_spinlocks[row->index]);
 		count += synx_fence_add(row->fence, fences, count);
-		mutex_unlock(&synx_dev->row_locks[row->index]);
+		spin_unlock_bh(&synx_dev->row_spinlocks[row->index]);
 	}
 
 	/* eliminate duplicates */
@@ -557,15 +545,14 @@ void *synx_from_handle(s32 synx_obj)
 {
 	s32 base;
 	struct synx_table_row *row;
-	unsigned long flags;
 
 	if (!synx_dev)
 		return NULL;
 
-	spin_lock_irqsave(&synx_dev->idr_lock, flags);
+	spin_lock_bh(&synx_dev->idr_lock);
 	row = (struct synx_table_row *) idr_find(&synx_dev->synx_ids,
 		synx_obj);
-	spin_unlock_irqrestore(&synx_dev->idr_lock, flags);
+	spin_unlock_bh(&synx_dev->idr_lock);
 
 	if (!row) {
 		pr_err(
@@ -588,15 +575,14 @@ s32 synx_create_handle(void *pObj)
 {
 	s32 base = current->tgid << 16;
 	s32 id;
-	unsigned long flags;
 
 	if (!synx_dev)
 		return -EINVAL;
 
-	spin_lock_irqsave(&synx_dev->idr_lock, flags);
+	spin_lock_bh(&synx_dev->idr_lock);
 	id = idr_alloc(&synx_dev->synx_ids, pObj,
 			base, base + 0x10000, GFP_ATOMIC);
-	spin_unlock_irqrestore(&synx_dev->idr_lock, flags);
+	spin_unlock_bh(&synx_dev->idr_lock);
 
 	pr_debug("generated Id: 0x%x, base: 0x%x, client: 0x%x\n",
 		id, base, current->tgid);
