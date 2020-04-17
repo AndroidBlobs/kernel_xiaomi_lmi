@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
 /*
- * Copyright (c) 2016-2020, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2019, The Linux Foundation. All rights reserved.
+ * Copyright (C) 2020 XiaoMi, Inc.
  */
 
 #ifndef __WALT_H
@@ -12,21 +13,6 @@
 #include <linux/sched/core_ctl.h>
 
 #define MAX_NR_CLUSTERS			3
-
-#ifdef CONFIG_HZ_300
-/*
- * Tick interval becomes to 3333333 due to
- * rounding error when HZ=300.
- */
-#define DEFAULT_SCHED_RAVG_WINDOW (3333333 * 6)
-#else
-/* Default window size (in ns) = 20ms */
-#define DEFAULT_SCHED_RAVG_WINDOW 20000000
-#endif
-
-/* Max window size (in ns) = 1s */
-#define MAX_SCHED_RAVG_WINDOW 1000000000
-#define NR_WINDOWS_PER_SEC (NSEC_PER_SEC / DEFAULT_SCHED_RAVG_WINDOW)
 
 #define WINDOW_STATS_RECENT		0
 #define WINDOW_STATS_MAX		1
@@ -43,7 +29,7 @@
 #define for_each_related_thread_group(grp) \
 	list_for_each_entry(grp, &active_related_thread_groups, list)
 
-#define NEW_TASK_ACTIVE_TIME 100000000
+#define SCHED_NEW_TASK_WINDOWS 5
 
 extern unsigned int sched_ravg_window;
 extern unsigned int new_sched_ravg_window;
@@ -59,6 +45,8 @@ extern __read_mostly unsigned int sched_ravg_hist_size;
 extern __read_mostly unsigned int sched_freq_aggregate;
 extern __read_mostly unsigned int sched_group_upmigrate;
 extern __read_mostly unsigned int sched_group_downmigrate;
+
+extern struct sched_cluster init_cluster;
 
 extern void update_task_ravg(struct task_struct *p, struct rq *rq, int event,
 						u64 wallclock, u64 irqtime);
@@ -209,7 +197,7 @@ scale_load_to_freq(u64 load, unsigned int src_freq, unsigned int dst_freq)
 
 static inline bool is_new_task(struct task_struct *p)
 {
-	return p->ravg.active_time < NEW_TASK_ACTIVE_TIME;
+	return p->ravg.active_windows < SCHED_NEW_TASK_WINDOWS;
 }
 
 static inline void clear_top_tasks_table(u8 *table)
@@ -379,15 +367,6 @@ static inline void walt_rq_dump(int cpu)
 	struct task_struct *tsk = cpu_curr(cpu);
 	int i;
 
-	/*
-	 * Increment the task reference so that it can't be
-	 * freed on a remote CPU. Since we are going to
-	 * enter panic, there is no need to decrement the
-	 * task reference. Decrementing the task reference
-	 * can't be done in atomic context, especially with
-	 * rq locks held.
-	 */
-	get_task_struct(tsk);
 	printk_deferred("CPU:%d nr_running:%u current: %d (%s)\n",
 			cpu, rq->nr_running, tsk->pid, tsk->comm);
 
@@ -399,7 +378,8 @@ static inline void walt_rq_dump(int cpu)
 	SCHED_PRINT(rq->nt_curr_runnable_sum);
 	SCHED_PRINT(rq->nt_prev_runnable_sum);
 	SCHED_PRINT(rq->cum_window_demand_scaled);
-	SCHED_PRINT(rq->task_exec_scale);
+	SCHED_PRINT(rq->cc.time);
+	SCHED_PRINT(rq->cc.cycles);
 	SCHED_PRINT(rq->grp_time.curr_runnable_sum);
 	SCHED_PRINT(rq->grp_time.prev_runnable_sum);
 	SCHED_PRINT(rq->grp_time.nt_curr_runnable_sum);
@@ -412,8 +392,11 @@ static inline void walt_rq_dump(int cpu)
 		printk_deferred("rq->load_subs[%d].new_subs=%llu)\n", i,
 				rq->load_subs[i].new_subs);
 	}
-	if (!exiting_task(tsk))
+
+	if (!exiting_task(tsk)) {
 		walt_task_dump(tsk);
+	}
+
 	SCHED_PRINT(sched_capacity_margin_up[cpu]);
 	SCHED_PRINT(sched_capacity_margin_down[cpu]);
 }

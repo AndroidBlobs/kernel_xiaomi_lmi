@@ -2,6 +2,7 @@
  * CPUFreq governor based on scheduler-provided CPU utilization data.
  *
  * Copyright (C) 2016, Intel Corporation
+ * Copyright (C) 2020 XiaoMi, Inc.
  * Author: Rafael J. Wysocki <rafael.j.wysocki@intel.com>
  *
  * This program is free software; you can redistribute it and/or modify
@@ -106,10 +107,12 @@ static bool sugov_should_update_freq(struct sugov_policy *sg_policy, u64 time)
 	 * by the hardware, as calculating the frequency is pointless if
 	 * we cannot in fact act on it.
 	 *
-	 * This is needed on the slow switching platforms too to prevent CPUs
-	 * going offline from leaving stale IRQ work items behind.
+	 * For the slow switching platforms, the kthread is always scheduled on
+	 * the right set of CPUs and any CPU can find the next frequency and
+	 * schedule the kthread.
 	 */
-	if (!cpufreq_this_cpu_can_update(sg_policy->policy))
+	if (sg_policy->policy->fast_switch_enabled &&
+	    !cpufreq_this_cpu_can_update(sg_policy->policy))
 		return false;
 
 	if (unlikely(sg_policy->limits_changed)) {
@@ -255,6 +258,8 @@ static void sugov_fast_switch(struct sugov_policy *sg_policy, u64 time,
 		for_each_cpu(cpu, policy->cpus)
 			trace_cpu_frequency(next_freq, cpu);
 	}
+	for_each_cpu(cpu, policy->cpus)
+		trace_cpu_frequency(next_freq, cpu);
 }
 
 static void sugov_deferred_update(struct sugov_policy *sg_policy, u64 time,
@@ -265,7 +270,7 @@ static void sugov_deferred_update(struct sugov_policy *sg_policy, u64 time,
 
 	if (use_pelt())
 		sg_policy->work_in_progress = true;
-	sched_irq_work_queue(&sg_policy->irq_work);
+	irq_work_queue(&sg_policy->irq_work);
 }
 
 #define TARGET_LOAD 80
