@@ -158,6 +158,7 @@ struct sdhci_msm_bus_vote {
 	int min_bw_vote;
 	int max_bw_vote;
 	bool is_max_bw_needed;
+	struct delayed_work vote_work;
 	struct device_attribute max_bus_bw;
 };
 
