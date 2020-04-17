@@ -568,6 +568,16 @@ config OKL4_RINGBUF
 	  Say Y here if you want to test communication between OKL4 guests
 	  using virtual interrupts and shared memory.
 
+config MOTOR_DRV8846
+        default n
+        help
+          Say Y here if you want to enable TI-drv8846 Stepper motor.
+
+config HALL_AKM09970
+        default n
+        help
+          Say Y here if you want to enable AKM09970 HALL sensor driver.
+
 config TEST_IRQ_REQUESTER
 	tristate "Receive interrupt notifications in user-space"
 	depends on DEBUG_FS
@@ -595,14 +605,6 @@ config WIGIG_SENSING_SPI
 	  operates over 60GHz frequency band, using low power SPI interface.
 	  The output of the driver is CIRs (Channel Impulse Response) which
 	  must be processed in user space in order to get meaningful results.
-
-config QTI_XR_SMRTVWR_MISC
-	tristate "QTI XR Reference device Misc driver support"
-	help
-	  This driver supports the misc chips in XR Reference devices
-	  such as NDI controller chip, Power up Sensor rails etc. Note: This
-	  driver initializes gpios, enables/disables LDOs that are part of
-	  XR standalone reference device.
 
 source "drivers/misc/c2port/Kconfig"
 source "drivers/misc/eeprom/Kconfig"
