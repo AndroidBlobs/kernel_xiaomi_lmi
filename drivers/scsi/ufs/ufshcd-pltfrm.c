@@ -3,6 +3,7 @@
  *
  * This code is based on drivers/scsi/ufs/ufshcd-pltfrm.c
  * Copyright (C) 2011-2013 Samsung India Software Operations
+ * Copyright (C) 2020 XiaoMi, Inc.
  *
  * Authors:
  *	Santosh Yaraganavi <santosh.sy@samsung.com>
@@ -231,16 +232,8 @@ static int ufshcd_populate_vreg(struct device *dev, const char *name,
 		if (of_property_read_bool(np, "vccq-pwr-collapse-sup"))
 			vreg->sys_suspend_pwr_off = true;
 	} else if (!strcmp(name, "vccq2")) {
-		prop = of_get_property(np, "vccq2-voltage-level", &len);
-		if (!prop || (len != (2 * sizeof(__be32)))) {
-			dev_warn(dev, "%s vccq2-voltage-level property.\n",
-				prop ? "invalid format" : "no");
-			vreg->min_uV = UFS_VREG_VCCQ2_MIN_UV;
-			vreg->max_uV = UFS_VREG_VCCQ2_MAX_UV;
-		} else {
-			vreg->min_uV = be32_to_cpup(&prop[0]);
-			vreg->max_uV = be32_to_cpup(&prop[1]);
-		}
+		vreg->min_uV = UFS_VREG_VCCQ2_MIN_UV;
+		vreg->max_uV = UFS_VREG_VCCQ2_MAX_UV;
 		if (of_property_read_bool(np, "vccq2-pwr-collapse-sup"))
 			vreg->sys_suspend_pwr_off = true;
 	}
@@ -310,6 +303,20 @@ static int ufshcd_parse_pinctrl_info(struct ufs_hba *hba)
 	}
 
 	return ret;
+}
+
+static int ufshcd_parse_extcon_info(struct ufs_hba *hba)
+{
+	struct extcon_dev *extcon;
+
+	extcon = extcon_get_edev_by_phandle(hba->dev, 0);
+	if (IS_ERR(extcon) && PTR_ERR(extcon) != -ENODEV)
+		return PTR_ERR(extcon);
+
+	if (!IS_ERR(extcon))
+		hba->extcon = extcon;
+
+	return 0;
 }
 
 static void ufshcd_parse_gear_limits(struct ufs_hba *hba)
@@ -521,6 +528,9 @@ int ufshcd_pltfrm_init(struct platform_device *pdev,
 	ufshcd_parse_gear_limits(hba);
 	ufshcd_parse_cmd_timeout(hba);
 	ufshcd_parse_force_g4_flag(hba);
+	err = ufshcd_parse_extcon_info(hba);
+	if (err)
+		goto dealloc_host;
 
 	if (!dev->dma_mask)
 		dev->dma_mask = &dev->coherent_dma_mask;
