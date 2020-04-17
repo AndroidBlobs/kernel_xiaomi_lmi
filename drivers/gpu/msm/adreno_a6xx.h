@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
 /*
- * Copyright (c) 2017-2020, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2017-2019, The Linux Foundation. All rights reserved.
+ * Copyright (C) 2020 XiaoMi, Inc.
  */
 
 #ifndef _ADRENO_A6XX_H_
@@ -42,6 +43,8 @@ struct adreno_a6xx_core {
 	u32 gmu_minor;
 	/** @prim_fifo_threshold: target specific value for PC_DBG_ECO_CNTL */
 	unsigned int prim_fifo_threshold;
+	/** @pdc_address_offset: Offset for the PDC region for the target */
+	unsigned int pdc_address_offset;
 	/** @sqefw_name: Name of the SQE microcode file */
 	const char *sqefw_name;
 	/** @gmufw_name: Name of the GMU firmware file */
@@ -147,6 +150,8 @@ struct cpu_gpu_lock {
 };
 
 #define A6XX_CP_CTXRECORD_MAGIC_REF     0xAE399D6EUL
+/* Size of each CP preemption record */
+#define A6XX_CP_CTXRECORD_SIZE_IN_BYTES     (2112 * 1024)
 /* Size of the user context record block (in bytes) */
 #define A6XX_CP_CTXRECORD_USER_RESTORE_SIZE (192 * 1024)
 /* Size of the performance counter save/restore block (in bytes) */
@@ -240,6 +245,31 @@ static inline int timed_poll_check_rscc(struct kgsl_device *device,
 	return -ETIMEDOUT;
 }
 
+/*
+ * read_AO_counter() - Returns the 64bit always on counter value
+ *
+ * @device: Pointer to KGSL device
+ */
+static inline uint64_t read_AO_counter(struct kgsl_device *device)
+{
+	unsigned int l, h, h1;
+
+	gmu_core_regread(device, A6XX_GMU_CX_GMU_ALWAYS_ON_COUNTER_H, &h);
+	gmu_core_regread(device, A6XX_GMU_CX_GMU_ALWAYS_ON_COUNTER_L, &l);
+	gmu_core_regread(device, A6XX_GMU_CX_GMU_ALWAYS_ON_COUNTER_H, &h1);
+
+	/*
+	 * If there's no change in COUNTER_H we have no overflow so return,
+	 * otherwise read COUNTER_L again
+	 */
+
+	if (h == h1)
+		return (uint64_t) l | ((uint64_t) h << 32);
+
+	gmu_core_regread(device, A6XX_GMU_CX_GMU_ALWAYS_ON_COUNTER_L, &l);
+	return (uint64_t) l | ((uint64_t) h1 << 32);
+}
+
 /* Preemption functions */
 void a6xx_preemption_trigger(struct adreno_device *adreno_dev);
 void a6xx_preemption_schedule(struct adreno_device *adreno_dev);
@@ -268,5 +298,4 @@ void a6xx_crashdump_init(struct adreno_device *adreno_dev);
 int a6xx_gmu_sptprac_enable(struct adreno_device *adreno_dev);
 void a6xx_gmu_sptprac_disable(struct adreno_device *adreno_dev);
 bool a6xx_gmu_sptprac_is_on(struct adreno_device *adreno_dev);
-u64 a6xx_gmu_read_ao_counter(struct kgsl_device *device);
 #endif

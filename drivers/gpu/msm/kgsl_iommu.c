@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
- * Copyright (c) 2011-2020, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2011-2019, The Linux Foundation. All rights reserved.
+ * Copyright (C) 2020 XiaoMi, Inc.
  */
 
 #include <linux/compat.h>
@@ -1287,8 +1288,6 @@ static int _init_secure_pt(struct kgsl_mmu *mmu, struct kgsl_pagetable *pt)
 	_enable_gpuhtw_llc(mmu, iommu_pt);
 
 	ret = _attach_pt(iommu_pt, ctx);
-	if (ret)
-		goto done;
 
 	if (MMU_FEATURE(mmu, KGSL_MMU_HYP_SECURE_ALLOC))
 		iommu_set_fault_handler(iommu_pt->domain,
@@ -1297,8 +1296,8 @@ static int _init_secure_pt(struct kgsl_mmu *mmu, struct kgsl_pagetable *pt)
 	ret = iommu_domain_get_attr(iommu_pt->domain,
 				DOMAIN_ATTR_CONTEXT_BANK, &cb_num);
 	if (ret) {
-		dev_err(device->dev, "get DOMAIN_ATTR_CONTEXT_BANK failed: %d\n",
-			ret);
+		dev_err(device->dev, "get DOMAIN_ATTR_PROCID failed: %d\n",
+				ret);
 		goto done;
 	}
 
@@ -1581,6 +1580,8 @@ static int _setup_user_context(struct kgsl_mmu *mmu)
 
 	ctx->default_pt = mmu->defaultpagetable;
 
+	kgsl_iommu_enable_clk(mmu);
+
 	sctlr_val = KGSL_IOMMU_GET_CTX_REG(ctx, SCTLR);
 
 	/*
@@ -1603,6 +1604,7 @@ static int _setup_user_context(struct kgsl_mmu *mmu)
 		sctlr_val |= (0x1 << KGSL_IOMMU_SCTLR_HUPCF_SHIFT);
 	}
 	KGSL_IOMMU_SET_CTX_REG(ctx, SCTLR, sctlr_val);
+	kgsl_iommu_disable_clk(mmu);
 
 	return 0;
 }
@@ -1651,21 +1653,6 @@ static int kgsl_iommu_start(struct kgsl_mmu *mmu)
 	int status;
 	struct kgsl_iommu *iommu = _IOMMU_PRIV(mmu);
 
-	kgsl_iommu_enable_clk(mmu);
-
-	status = _setup_user_context(mmu);
-	if (status) {
-		kgsl_iommu_disable_clk(mmu);
-		return status;
-	}
-
-	status = _setup_secure_context(mmu);
-	if (status) {
-		_detach_context(&iommu->ctx[KGSL_IOMMU_CONTEXT_USER]);
-		kgsl_iommu_disable_clk(mmu);
-		return status;
-	}
-
 	/* Set the following registers only when the MMU type is QSMMU */
 	if (mmu->subtype != KGSL_IOMMU_SMMU_V500) {
 		/* Enable hazard check from GPU_SMMU_HUM_CFG */
@@ -1678,11 +1665,18 @@ static int kgsl_iommu_start(struct kgsl_mmu *mmu)
 		wmb();
 	}
 
+	status = _setup_user_context(mmu);
+	if (status)
+		return status;
+
+	status = _setup_secure_context(mmu);
+	if (status) {
+		_detach_context(&iommu->ctx[KGSL_IOMMU_CONTEXT_USER]);
+		return status;
+	}
+
 	/* Make sure the hardware is programmed to the default pagetable */
-	kgsl_iommu_set_pt(mmu, mmu->defaultpagetable);
-	kgsl_iommu_disable_clk(mmu);
-	set_bit(KGSL_MMU_STARTED, &mmu->flags);
-	return 0;
+	return kgsl_iommu_set_pt(mmu, mmu->defaultpagetable);
 }
 
 static int
@@ -2059,8 +2053,6 @@ static void kgsl_iommu_stop(struct kgsl_mmu *mmu)
 		for (i = 0; i < KGSL_IOMMU_CONTEXT_MAX; i++)
 			_detach_context(&iommu->ctx[i]);
 	}
-
-	clear_bit(KGSL_MMU_STARTED, &mmu->flags);
 }
 
 static u64

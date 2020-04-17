@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
- * Copyright (c) 2017-2020, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2017-2019, The Linux Foundation. All rights reserved.
+ * Copyright (C) 2020 XiaoMi, Inc.
  */
 
 #include <linux/firmware.h>
@@ -50,6 +51,7 @@ static u32 a6xx_pwrup_reglist[] = {
 
 /* IFPC only static powerup restore list */
 static u32 a6xx_ifpc_pwrup_reglist[] = {
+	A6XX_RBBM_VBIF_CLIENT_QOS_CNTL,
 	A6XX_CP_CHICKEN_DBG,
 	A6XX_CP_DBG_ECO_CNTL,
 	A6XX_CP_PROTECT_CNTL,
@@ -90,29 +92,14 @@ static u32 a6xx_ifpc_pwrup_reglist[] = {
 
 /* a620 and a650 need to program A6XX_CP_PROTECT_REG_47 for the infinite span */
 static u32 a650_pwrup_reglist[] = {
-	A6XX_RBBM_GBIF_CLIENT_QOS_CNTL,
 	A6XX_CP_PROTECT_REG + 47,
 };
 
-/* Applicable to a640 and a680 */
-static u32 a640_pwrup_reglist[] = {
-	A6XX_RBBM_GBIF_CLIENT_QOS_CNTL,
-};
-
-/* Applicable to a630 */
-static u32 a630_pwrup_reglist[] = {
-	A6XX_RBBM_VBIF_CLIENT_QOS_CNTL,
-};
-
-/* Applicable to a615 family */
 static u32 a615_pwrup_reglist[] = {
-	A6XX_RBBM_VBIF_CLIENT_QOS_CNTL,
 	A6XX_UCHE_GBIF_GX_CONFIG,
 };
 
-/* Applicable to a612 */
 static u32 a612_pwrup_reglist[] = {
-	A6XX_RBBM_GBIF_CLIENT_QOS_CNTL,
 	A6XX_RBBM_PERFCTR_CNTL,
 };
 
@@ -348,10 +335,6 @@ static void a6xx_patch_pwrup_reglist(struct adreno_device *adreno_dev)
 		reglist[items++] = REGLIST(a612_pwrup_reglist);
 	else if (adreno_is_a615_family(adreno_dev))
 		reglist[items++] = REGLIST(a615_pwrup_reglist);
-	else if (adreno_is_a630(adreno_dev))
-		reglist[items++] = REGLIST(a630_pwrup_reglist);
-	else if (adreno_is_a640(adreno_dev) || adreno_is_a680(adreno_dev))
-		reglist[items++] = REGLIST(a640_pwrup_reglist);
 	else if (adreno_is_a650(adreno_dev) || adreno_is_a620(adreno_dev))
 		reglist[items++] = REGLIST(a650_pwrup_reglist);
 
@@ -446,8 +429,8 @@ static void a6xx_start(struct adreno_device *adreno_dev)
 	kgsl_regwrite(device, A6XX_UCHE_FILTER_CNTL, 0x804);
 	kgsl_regwrite(device, A6XX_UCHE_CACHE_WAYS, 0x4);
 
-	if (adreno_is_a640_family(adreno_dev) ||
-		adreno_is_a650_family(adreno_dev)) {
+	/* ROQ sizes are twice as big on a640/a680 than on a630 */
+	if (ADRENO_GPUREV(adreno_dev) >= ADRENO_REV_A640) {
 		kgsl_regwrite(device, A6XX_CP_ROQ_THRESHOLDS_2, 0x02000140);
 		kgsl_regwrite(device, A6XX_CP_ROQ_THRESHOLDS_1, 0x8040362C);
 	} else if (adreno_is_a612(adreno_dev) || adreno_is_a610(adreno_dev)) {
@@ -597,14 +580,23 @@ static void a6xx_start(struct adreno_device *adreno_dev)
 }
 
 /*
- * a6xx_zap_load() - Load zap shader
+ * a6xx_microcode_load() - Load microcode
  * @adreno_dev: Pointer to adreno device
  */
-static int a6xx_zap_load(struct adreno_device *adreno_dev)
+static int a6xx_microcode_load(struct adreno_device *adreno_dev)
 {
+	struct kgsl_device *device = KGSL_DEVICE(adreno_dev);
+	struct adreno_firmware *fw = ADRENO_FW(adreno_dev, ADRENO_FW_SQE);
 	const struct adreno_a6xx_core *a6xx_core = to_a6xx_core(adreno_dev);
+	uint64_t gpuaddr;
 	void *zap;
 	int ret = 0;
+
+	gpuaddr = fw->memdesc.gpuaddr;
+	kgsl_regwrite(device, A6XX_CP_SQE_INSTR_BASE_LO,
+				lower_32_bits(gpuaddr));
+	kgsl_regwrite(device, A6XX_CP_SQE_INSTR_BASE_HI,
+				upper_32_bits(gpuaddr));
 
 	/* Load the zap shader firmware through PIL if its available */
 	if (a6xx_core->zap_name && !adreno_dev->zap_loaded) {
@@ -830,7 +822,6 @@ static int a6xx_rb_start(struct adreno_device *adreno_dev)
 {
 	struct adreno_ringbuffer *rb = ADRENO_CURRENT_RINGBUFFER(adreno_dev);
 	struct kgsl_device *device = &adreno_dev->dev;
-	struct adreno_firmware *fw = ADRENO_FW(adreno_dev, ADRENO_FW_SQE);
 	uint64_t addr;
 	int ret;
 
@@ -849,24 +840,17 @@ static int a6xx_rb_start(struct adreno_device *adreno_dev)
 	adreno_writereg64(adreno_dev, ADRENO_REG_CP_RB_BASE,
 			ADRENO_REG_CP_RB_BASE_HI, rb->buffer_desc.gpuaddr);
 
+	ret = a6xx_microcode_load(adreno_dev);
+	if (ret)
+		return ret;
+
 	if (ADRENO_FEATURE(adreno_dev, ADRENO_APRIV))
 		kgsl_regwrite(device, A6XX_CP_APRIV_CNTL, A6XX_APRIV_DEFAULT);
-
-	/* Program the ucode base for CP */
-	kgsl_regwrite(device, A6XX_CP_SQE_INSTR_BASE_LO,
-			lower_32_bits(fw->memdesc.gpuaddr));
-
-	kgsl_regwrite(device, A6XX_CP_SQE_INSTR_BASE_HI,
-			upper_32_bits(fw->memdesc.gpuaddr));
 
 	/* Clear the SQE_HALT to start the CP engine */
 	kgsl_regwrite(device, A6XX_CP_SQE_CNTL, 1);
 
 	ret = a6xx_send_cp_init(adreno_dev, rb);
-	if (ret)
-		return ret;
-
-	ret = a6xx_zap_load(adreno_dev);
 	if (ret)
 		return ret;
 
@@ -1313,19 +1297,11 @@ static const char *a6xx_fault_block_uche(struct kgsl_device *device,
 	unsigned int uche_client_id = 0;
 	static char str[40];
 
-	/*
-	 * Smmu driver takes a vote on CX gdsc before calling the kgsl pagefault
-	 * handler. If there is contention for device mutex in this path and the
-	 * dispatcher fault handler is holding this lock, trying to turn off CX
-	 * gdsc will fail during the reset. So to avoid blocking here, try to
-	 * lock device mutex and return if it fails.
-	 */
-	if (!mutex_trylock(&device->mutex))
-		return "UCHE";
+	mutex_lock(&device->mutex);
 
 	if (!kgsl_state_is_awake(device)) {
 		mutex_unlock(&device->mutex);
-		return "UCHE";
+		return "UCHE: unknown";
 	}
 
 	kgsl_regread(device, A6XX_UCHE_CLIENT_PF, &uche_client_id);
@@ -1333,7 +1309,7 @@ static const char *a6xx_fault_block_uche(struct kgsl_device *device,
 
 	/* Ignore the value if the gpu is in IFPC */
 	if (uche_client_id == SCOOBYDOO)
-		return "UCHE";
+		return "UCHE: unknown";
 
 	uche_client_id &= A6XX_UCHE_CLIENT_PF_CLIENT_ID_MASK;
 	snprintf(str, sizeof(str), "UCHE: %s",
@@ -2303,7 +2279,7 @@ static void a6xx_platform_setup(struct adreno_device *adreno_dev)
 	adreno_dev->perfctr_pwr_lo = A6XX_GMU_CX_GMU_POWER_COUNTER_XOCLK_0_L;
 
 	/* Set the counter for IFPC */
-	if (ADRENO_FEATURE(adreno_dev, ADRENO_IFPC))
+	if (gmu_core_isenabled(KGSL_DEVICE(adreno_dev)))
 		adreno_dev->perfctr_ifpc_lo =
 			A6XX_GMU_CX_GMU_POWER_COUNTER_XOCLK_4_L;
 
