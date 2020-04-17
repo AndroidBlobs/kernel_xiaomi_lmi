@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
 /* Copyright (c) 2016-2020, The Linux Foundation. All rights reserved. */
+/* Copyright (C) 2020 XiaoMi, Inc. */
 
 #ifndef _CNSS_MAIN_H
 #define _CNSS_MAIN_H
@@ -21,15 +22,12 @@
 #define QMI_WLFW_MAX_BUILD_ID_LEN	128
 #define CNSS_RDDM_TIMEOUT_MS		20000
 #define RECOVERY_TIMEOUT		60000
-#define WLAN_WD_TIMEOUT_MS		60000
 #define TIME_CLOCK_FREQ_HZ		19200000
 
 #define CNSS_EVENT_SYNC   BIT(0)
 #define CNSS_EVENT_UNINTERRUPTIBLE BIT(1)
-#define CNSS_EVENT_UNKILLABLE BIT(2)
 #define CNSS_EVENT_SYNC_UNINTERRUPTIBLE (CNSS_EVENT_SYNC | \
 				CNSS_EVENT_UNINTERRUPTIBLE)
-#define CNSS_EVENT_SYNC_UNKILLABLE (CNSS_EVENT_SYNC | CNSS_EVENT_UNKILLABLE)
 
 enum cnss_dev_bus_type {
 	CNSS_BUS_NONE = -1,
@@ -364,7 +362,7 @@ struct cnss_plat_data {
 	u64 dynamic_feature;
 	void *get_info_cb_ctx;
 	int (*get_info_cb)(void *ctx, void *event, int event_len);
-	u8 use_nv_mac;
+	bool use_nv_mac;
 	u8 set_wlaon_pwr_ctrl;
 	struct kobject *shutdown_kobj;
 };

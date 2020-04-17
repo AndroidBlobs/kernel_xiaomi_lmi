@@ -14,6 +14,7 @@
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  *
  * Copyright (C) 2014 ARM Limited
+ * Copyright (C) 2020 XiaoMi, Inc.
  *
  * Author: Will Deacon <will.deacon@arm.com>
  */
@@ -28,6 +29,7 @@
 #include <linux/slab.h>
 #include <linux/types.h>
 #include <linux/dma-mapping.h>
+#include <trace/events/iommu.h>
 
 #include <asm/barrier.h>
 
@@ -526,6 +528,7 @@ static int __arm_lpae_map(struct arm_lpae_io_pgtable *data, unsigned long iova,
 		pte = arm_lpae_install_table(cptep, ptep, 0, cfg, 0);
 		if (pte)
 			__arm_lpae_free_pages(cptep, tblsz, cfg, cookie);
+		trace_io_pgtable_install(cptep, ptep, *ptep, 0);
 
 	} else if (!(cfg->quirks & IO_PGTABLE_QUIRK_NO_DMA) &&
 		   !(pte & ARM_LPAE_PTE_SW_SYNC)) {
@@ -634,8 +637,7 @@ static int arm_lpae_map_sg(struct io_pgtable_ops *ops, unsigned long iova,
 	arm_lpae_iopte prot;
 	struct scatterlist *s;
 	size_t mapped = 0;
-	int i;
-	int ret = -EINVAL;
+	int i, ret;
 	unsigned int min_pagesz;
 	struct io_pgtable_cfg *cfg = &data->iop.cfg;
 	struct map_state ms;
@@ -706,7 +708,7 @@ static int arm_lpae_map_sg(struct io_pgtable_ops *ops, unsigned long iova,
 out_err:
 	/* Return the size of the partial mapping so that they can be undone */
 	*size = mapped;
-	return ret;
+	return 0;
 }
 
 static void __arm_lpae_free_pgtable(struct arm_lpae_io_pgtable *data, int lvl,
@@ -791,6 +793,8 @@ static size_t arm_lpae_split_blk_unmap(struct arm_lpae_io_pgtable *data,
 	}
 
 	pte = arm_lpae_install_table(tablep, ptep, blk_pte, cfg, child_cnt);
+	trace_io_pgtable_install(tablep, ptep, *ptep, 1);
+
 	if (pte != blk_pte) {
 		__arm_lpae_free_pages(tablep, tablesz, cfg, cookie);
 		/*
@@ -829,11 +833,14 @@ static size_t __arm_lpae_unmap(struct arm_lpae_io_pgtable *data,
 
 	/* If the size matches this level, we're in the right place */
 	if (size == ARM_LPAE_BLOCK_SIZE(lvl, data)) {
+		arm_lpae_iopte *blk_table = ptep;
 		__arm_lpae_set_pte(ptep, 0, &iop->cfg);
 
 		if (!iopte_leaf(pte, lvl)) {
 			/* Also flush any partial walks */
 			ptep = iopte_deref(pte, data);
+			trace_io_pgtable_free(ptep, blk_table, pte, iova, 1);
+			io_pgtable_tlb_flush_all(&data->iop);
 			__arm_lpae_free_pgtable(data, lvl + 1, ptep);
 		}
 
@@ -866,7 +873,9 @@ static size_t __arm_lpae_unmap(struct arm_lpae_io_pgtable *data,
 		iopte_tblcnt_sub(ptep, entries);
 		if (!iopte_tblcnt(*ptep)) {
 			/* no valid mappings left under this table. free it. */
+			trace_io_pgtable_free(table_base, ptep, *ptep, iova, 0);
 			__arm_lpae_set_pte(ptep, 0, &iop->cfg);
+			io_pgtable_tlb_flush_all(&data->iop);
 			__arm_lpae_free_pgtable(data, lvl + 1, table_base);
 		}
 

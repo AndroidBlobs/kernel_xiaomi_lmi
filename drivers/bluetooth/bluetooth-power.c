@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
- * Copyright (c) 2016-2020, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2019, The Linux Foundation. All rights reserved.
+ * Copyright (C) 2020 XiaoMi, Inc.
  */
 
 /*
@@ -35,6 +36,7 @@
 #define BT_PWR_INFO(fmt, arg...) pr_info("%s: " fmt "\n", __func__, ## arg)
 #define BT_PWR_ERR(fmt, arg...)  pr_err("%s: " fmt "\n", __func__, ## arg)
 
+
 static const struct of_device_id bt_power_match_table[] = {
 	{	.compatible = "qca,ar3002" },
 	{	.compatible = "qca,qca6174" },
@@ -62,7 +64,6 @@ static int bt_vreg_init(struct bt_power_vreg_data *vreg)
 	vreg->reg = regulator_get(dev, vreg->name);
 	if (IS_ERR(vreg->reg)) {
 		rc = PTR_ERR(vreg->reg);
-		vreg->reg = NULL;
 		pr_err("%s: regulator_get(%s) failed. rc=%d\n",
 			__func__, vreg->name, rc);
 		goto out;
@@ -252,9 +253,6 @@ static int bt_configure_gpios(int on)
 {
 	int rc = 0;
 	int bt_reset_gpio = bt_power_pdata->bt_gpio_sys_rst;
-	int bt_sw_ctrl_gpio  =  bt_power_pdata->bt_gpio_sw_ctrl;
-	int bt_debug_gpio  =  bt_power_pdata->bt_gpio_debug;
-	int assertDebugGpio = 0;
 
 	if (on) {
 		rc = gpio_request(bt_reset_gpio, "bt_sys_rst_n");
@@ -270,53 +268,15 @@ static int bt_configure_gpios(int on)
 			return rc;
 		}
 		msleep(50);
-		BT_PWR_ERR("BTON:Turn Bt Off bt-reset-gpio(%d) value(%d)\n",
-			bt_reset_gpio, gpio_get_value(bt_reset_gpio));
-		BT_PWR_ERR("BTON:Turn Bt Off bt-sw-ctrl-gpio(%d) value(%d)\n",
-			bt_sw_ctrl_gpio,  gpio_get_value(bt_sw_ctrl_gpio));
-
 		rc = gpio_direction_output(bt_reset_gpio, 1);
 		if (rc) {
 			BT_PWR_ERR("Unable to set direction\n");
 			return rc;
 		}
 		msleep(50);
-		/*  Check  if  SW_CTRL  is  asserted  */
-		if  (bt_sw_ctrl_gpio  >=  0)  {
-			rc  =  gpio_direction_input(bt_sw_ctrl_gpio);
-			if  (rc)  {
-				BT_PWR_ERR("SWCTRL Dir Set Problem:%d\n", rc);
-			}  else  if  (!gpio_get_value(bt_sw_ctrl_gpio))  {
-				/*  Assert  debug  GPIO, if available  as
-				 * SW_CTRL  is  not  asserted
-				 */
-				if  (bt_debug_gpio  >=  0)
-					assertDebugGpio = 1;
-			}
-		}
-		if (assertDebugGpio) {
-			rc  =  gpio_request(bt_debug_gpio, "bt_debug_n");
-			if  (rc)  {
-				BT_PWR_ERR("unable to request Debug Gpio\n");
-			}  else  {
-				rc = gpio_direction_output(bt_debug_gpio,  1);
-				if (rc)
-					BT_PWR_ERR("Prob: Set Debug-Gpio\n");
-			}
-		}
-		BT_PWR_ERR("BTON:Turn Bt On bt-reset-gpio(%d) value(%d)\n",
-			bt_reset_gpio, gpio_get_value(bt_reset_gpio));
-		BT_PWR_ERR("BTON:Turn Bt On bt-sw-ctrl-gpio(%d) value(%d)\n",
-			bt_sw_ctrl_gpio,  gpio_get_value(bt_sw_ctrl_gpio));
 	} else {
 		gpio_set_value(bt_reset_gpio, 0);
-		if  (bt_debug_gpio  >=  0)
-			gpio_set_value(bt_debug_gpio,  0);
 		msleep(100);
-		BT_PWR_ERR("BT-OFF:bt-reset-gpio(%d) value(%d)\n",
-			bt_reset_gpio, gpio_get_value(bt_reset_gpio));
-		BT_PWR_ERR("BT-OFF:bt-sw-ctrl-gpio(%d) value(%d)\n",
-			bt_sw_ctrl_gpio,  gpio_get_value(bt_sw_ctrl_gpio));
 	}
 
 	BT_PWR_ERR("bt_gpio= %d on: %d is successful", bt_reset_gpio, on);
@@ -432,10 +392,6 @@ static int bluetooth_power(int on)
 gpio_fail:
 		if (bt_power_pdata->bt_gpio_sys_rst > 0)
 			gpio_free(bt_power_pdata->bt_gpio_sys_rst);
-		if  (bt_power_pdata->bt_gpio_sw_ctrl  >  0)
-			gpio_free(bt_power_pdata->bt_gpio_sw_ctrl);
-		if  (bt_power_pdata->bt_gpio_debug  >  0)
-			gpio_free(bt_power_pdata->bt_gpio_debug);
 		if (bt_power_pdata->bt_chip_clk)
 			bt_clk_disable(bt_power_pdata->bt_chip_clk);
 clk_fail:
@@ -644,7 +600,7 @@ err:
 static int bt_dt_parse_clk_info(struct device *dev,
 		struct bt_power_clk_data **clk_data)
 {
-	int ret = 0;
+	int ret = -EINVAL;
 	struct bt_power_clk_data *clk = NULL;
 	struct device_node *np = dev->of_node;
 
@@ -681,7 +637,7 @@ static int bt_dt_parse_clk_info(struct device *dev,
 
 		*clk_data = clk;
 	} else {
-		BT_PWR_INFO("clocks is not provided in device tree");
+		BT_PWR_ERR("clocks is not provided in device tree");
 	}
 
 err:
@@ -702,62 +658,74 @@ static int bt_power_populate_dt_pinfo(struct platform_device *pdev)
 			of_get_named_gpio(pdev->dev.of_node,
 						"qca,bt-reset-gpio", 0);
 		if (bt_power_pdata->bt_gpio_sys_rst < 0)
-			BT_PWR_INFO("bt-reset-gpio not provided in devicetree");
-
-		bt_power_pdata->bt_gpio_sw_ctrl  =
-			of_get_named_gpio(pdev->dev.of_node,
-						"qca,bt-sw-ctrl-gpio",  0);
-
-		bt_power_pdata->bt_gpio_debug  =
-			of_get_named_gpio(pdev->dev.of_node,
-						"qca,bt-debug-gpio",  0);
+			BT_PWR_ERR("bt-reset-gpio not provided in device tree");
 
 		rc = bt_dt_parse_vreg_info(&pdev->dev,
 					&bt_power_pdata->bt_vdd_core,
 					"qca,bt-vdd-core");
+		if (rc < 0)
+			BT_PWR_ERR("bt-vdd-core not provided in device tree");
 
 		rc = bt_dt_parse_vreg_info(&pdev->dev,
 					&bt_power_pdata->bt_vdd_io,
 					"qca,bt-vdd-io");
+		if (rc < 0)
+			BT_PWR_ERR("bt-vdd-io not provided in device tree");
 
 		rc = bt_dt_parse_vreg_info(&pdev->dev,
 					&bt_power_pdata->bt_vdd_xtal,
 					"qca,bt-vdd-xtal");
+		if (rc < 0)
+			BT_PWR_ERR("bt-vdd-xtal not provided in device tree");
 
 		rc = bt_dt_parse_vreg_info(&pdev->dev,
 					&bt_power_pdata->bt_vdd_pa,
 					"qca,bt-vdd-pa");
+		if (rc < 0)
+			BT_PWR_ERR("bt-vdd-pa not provided in device tree");
 
 		rc = bt_dt_parse_vreg_info(&pdev->dev,
 					&bt_power_pdata->bt_vdd_ldo,
 					"qca,bt-vdd-ldo");
+		if (rc < 0)
+			BT_PWR_ERR("bt-vdd-ldo not provided in device tree");
 
 		rc = bt_dt_parse_vreg_info(&pdev->dev,
 					&bt_power_pdata->bt_chip_pwd,
 					"qca,bt-chip-pwd");
+		if (rc < 0)
+			BT_PWR_ERR("bt-chip-pwd not provided in device tree");
 
 		rc = bt_dt_parse_vreg_info(&pdev->dev,
 					&bt_power_pdata->bt_vdd_aon,
 					"qca,bt-vdd-aon");
+		if (rc < 0)
+			BT_PWR_ERR("bt-vdd-aon not provided in device tree");
 
 		rc = bt_dt_parse_vreg_info(&pdev->dev,
 					&bt_power_pdata->bt_vdd_dig,
 					"qca,bt-vdd-dig");
-
+		if (rc < 0)
+			BT_PWR_ERR("bt-vdd-dig not provided in device tree");
 		rc = bt_dt_parse_vreg_info(&pdev->dev,
 					&bt_power_pdata->bt_vdd_rfa1,
 					"qca,bt-vdd-rfa1");
-
+		if (rc < 0)
+			BT_PWR_ERR("bt-vdd-rfa1 not provided in device tree");
 		rc = bt_dt_parse_vreg_info(&pdev->dev,
 					&bt_power_pdata->bt_vdd_rfa2,
 					"qca,bt-vdd-rfa2");
-
+		if (rc < 0)
+			BT_PWR_ERR("bt-vdd-rfa2 not provided in device tree");
 		rc = bt_dt_parse_vreg_info(&pdev->dev,
 					&bt_power_pdata->bt_vdd_asd,
 					"qca,bt-vdd-asd");
-
+		if (rc < 0)
+			BT_PWR_ERR("bt-vdd-asd not provided in device tree");
 		rc = bt_dt_parse_clk_info(&pdev->dev,
 					&bt_power_pdata->bt_chip_clk);
+		if (rc < 0)
+			BT_PWR_ERR("clock not provided in device tree");
 	}
 
 	bt_power_pdata->bt_power_setup = bluetooth_power;
@@ -850,7 +818,6 @@ static long bt_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 {
 	int ret = 0, pwr_cntrl = 0;
 	int chipset_version = 0;
-	long  value  =  -1;
 
 	switch (cmd) {
 	case BT_CMD_SLIM_TEST:
@@ -885,90 +852,6 @@ static long bt_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 		} else {
 			BT_PWR_ERR("got invalid soc version");
 			soc_id = 0;
-		}
-		break;
-	case BT_CMD_GETVAL_RESET_GPIO:
-		if (bt_power_pdata->bt_gpio_sys_rst > 0) {
-			value = (long)gpio_get_value(
-				bt_power_pdata->bt_gpio_sys_rst);
-			BT_PWR_ERR("GET_RESET_GPIO(%d) value(%d)",
-				bt_power_pdata->bt_gpio_sys_rst, value);
-			ret = value;
-		} else {
-			BT_PWR_ERR("RESET_GPIO not configured");
-			ret = -EINVAL;
-		}
-		break;
-	case BT_CMD_GETVAL_SW_CTRL_GPIO:
-		if (bt_power_pdata->bt_gpio_sw_ctrl > 0) {
-			value = (long)gpio_get_value(
-				bt_power_pdata->bt_gpio_sw_ctrl);
-			BT_PWR_ERR("GET_SWCTRL_GPIO(%d) value(%d)",
-				bt_power_pdata->bt_gpio_sw_ctrl,  value);
-			ret = value;
-		} else {
-			BT_PWR_ERR("SW_CTRL_GPIO not configured");
-			ret = -EINVAL;
-		}
-		break;
-	case BT_CMD_GETVAL_VDD_AON_LDO:
-		if ((bt_power_pdata->bt_vdd_aon) &&
-				(bt_power_pdata->bt_vdd_aon->is_enabled) &&
-				(regulator_is_enabled(
-					bt_power_pdata->bt_vdd_aon->reg))) {
-			value = (int)regulator_get_voltage(
-				bt_power_pdata->bt_vdd_aon->reg);
-			BT_PWR_ERR("GET_VDD_AON_LDO(%d) value(%d)",
-				bt_power_pdata->bt_vdd_aon, value);
-			ret = value;
-		} else {
-			BT_PWR_ERR("VDD-AON_LDO not configure/enabled");
-			ret = -EINVAL;
-		}
-		break;
-	case BT_CMD_GETVAL_VDD_DIG_LDO:
-		if ((bt_power_pdata->bt_vdd_dig) &&
-				(bt_power_pdata->bt_vdd_dig->is_enabled) &&
-				(regulator_is_enabled(
-					bt_power_pdata->bt_vdd_dig->reg))) {
-			value = (int)regulator_get_voltage(
-				bt_power_pdata->bt_vdd_dig->reg);
-			BT_PWR_ERR("GET_VDD_DIG_LDO(%d) value(%d)",
-				bt_power_pdata->bt_vdd_dig, value);
-			ret = value;
-		} else {
-			BT_PWR_ERR("VDD-DIG-LDO not configured/enabled");
-			ret = -EINVAL;
-		}
-		break;
-	case BT_CMD_GETVAL_VDD_RFA1_LDO:
-		if ((bt_power_pdata->bt_vdd_rfa1) &&
-				(bt_power_pdata->bt_vdd_rfa1->is_enabled) &&
-				(regulator_is_enabled(
-					bt_power_pdata->bt_vdd_rfa1->reg))) {
-			value = (int)regulator_get_voltage(
-				bt_power_pdata->bt_vdd_rfa1->reg);
-			BT_PWR_ERR("GET_VDD_RFA1_LDO(%d) value(%d)",
-				bt_power_pdata->bt_vdd_rfa1, value);
-			ret = value;
-		} else {
-			BT_PWR_ERR("VDD-RFA1-LDO not configure/enabled");
-			ret = -EINVAL;
-		}
-		break;
-	case BT_CMD_GETVAL_VDD_RFA2_LDO:
-		if ((bt_power_pdata->bt_vdd_rfa2) &&
-				(bt_power_pdata->bt_vdd_rfa2->is_enabled) &&
-				(regulator_is_enabled(
-					bt_power_pdata->bt_vdd_rfa2->reg))) {
-			value = (int)regulator_get_voltage(
-				bt_power_pdata->bt_vdd_rfa2->reg);
-			BT_PWR_ERR("GET_VDD_RFA2_LDO(%d) value(%d)",
-				bt_power_pdata->bt_vdd_rfa2, value);
-			ret = value;
-		}  else  {
-			BT_PWR_ERR("VDD-RFA2-LDO not configure/enabled");
-			ret = -EINVAL;
 		}
 		break;
 	default:

@@ -34,8 +34,6 @@
  */
 #define WIL_EDMG_CHANNELS (BIT(0) | BIT(1) | BIT(2) | BIT(3))
 
-#define WIL_DISABLE_EDMG 255
-
 bool disable_ap_sme;
 module_param(disable_ap_sme, bool, 0444);
 MODULE_PARM_DESC(disable_ap_sme, " let user space handle AP mode SME");
@@ -152,28 +150,13 @@ enum wil_nl_60g_evt_type {
 	NL_60G_EVT_FW_WMI,
 	NL_60G_EVT_DRIVER_SHUTOWN,
 	NL_60G_EVT_DRIVER_DEBUG_EVENT,
-	NL_60G_EVT_DRIVER_GENERIC,
 };
-
-enum wil_nl_60g_generic_evt {
-	NL_60G_GEN_EVT_FW_STATE,
-};
-
-struct wil_nl_60g_generic_event { /* NL_60G_EVT_DRIVER_GENERIC */
-	u32 evt_id; /* wil_nl_60g_generic_evt */
-} __packed;
-
-struct wil_nl_60g_fw_state_event {
-	struct wil_nl_60g_generic_event hdr;
-	u32 fw_state; /* wil_fw_state */
-} __packed;
 
 enum wil_nl_60g_debug_cmd {
 	NL_60G_DBG_FORCE_WMI_SEND,
 	NL_60G_GEN_RADAR_ALLOC_BUFFER,
 	NL_60G_GEN_FW_RESET,
 	NL_60G_GEN_GET_DRIVER_CAPA,
-	NL_60G_GEN_GET_FW_STATE,
 };
 
 struct wil_nl_60g_send_receive_wmi {
@@ -547,8 +530,6 @@ static const char * const key_usage_str[] = {
 	[WMI_KEY_USE_PAIRWISE]	= "PTK",
 	[WMI_KEY_USE_RX_GROUP]	= "RX_GTK",
 	[WMI_KEY_USE_TX_GROUP]	= "TX_GTK",
-	[WMI_KEY_USE_STORE_PTK]	= "STORE_PTK",
-	[WMI_KEY_USE_APPLY_PTK]	= "APPLY_PTK",
 };
 
 int wil_iftype_nl2wmi(enum nl80211_iftype type)
@@ -606,9 +587,6 @@ int wil_spec2wmi_ch(u8 spec_ch, u8 *wmi_ch)
 		break;
 	case 12:
 		*wmi_ch = WMI_CHANNEL_12;
-		break;
-	case WIL_DISABLE_EDMG:
-		*wmi_ch = 0;
 		break;
 	default:
 		return -EINVAL;
@@ -763,7 +741,7 @@ static int wil_cfg80211_get_station(struct wiphy *wiphy,
 /*
  * Find @idx-th active STA for specific MID for station dump.
  */
-int wil_find_cid_by_idx(struct wil6210_priv *wil, u8 mid, int idx)
+static int wil_find_cid_by_idx(struct wil6210_priv *wil, u8 mid, int idx)
 {
 	int i;
 
@@ -1803,7 +1781,6 @@ void wil_set_crypto_rx(u8 key_index, enum wmi_key_usage key_usage,
 		return;
 
 	switch (key_usage) {
-	case WMI_KEY_USE_STORE_PTK:
 	case WMI_KEY_USE_PAIRWISE:
 		for (tid = 0; tid < WIL_STA_TID_NUM; tid++) {
 			cc = &cs->tid_crypto_rx[tid].key_id[key_index];
@@ -1900,16 +1877,6 @@ static int wil_cfg80211_add_key(struct wiphy *wiphy,
 			params->seq_len, params->seq);
 		return -EINVAL;
 	}
-
-	spin_lock_bh(&wil->eap_lock);
-	if (pairwise && wdev->iftype == NL80211_IFTYPE_STATION &&
-	    (vif->ptk_rekey_state == WIL_REKEY_M3_RECEIVED ||
-	     vif->ptk_rekey_state == WIL_REKEY_WAIT_M4_SENT)) {
-		key_usage = WMI_KEY_USE_STORE_PTK;
-		vif->ptk_rekey_state = WIL_REKEY_WAIT_M4_SENT;
-		wil_dbg_misc(wil, "Store EAPOL key\n");
-	}
-	spin_unlock_bh(&wil->eap_lock);
 
 	rc = wmi_add_cipher_key(vif, key_index, mac_addr, params->key_len,
 				params->key, key_usage);
@@ -2364,11 +2331,6 @@ static int wil_cfg80211_change_beacon(struct wiphy *wiphy,
 	struct wil6210_vif *vif = ndev_to_vif(ndev);
 	int rc;
 	u32 privacy = 0;
-	u16 len = 0, proberesp_len = 0;
-	u8 *ies = NULL, *proberesp;
-	bool ssid_changed = false;
-	const u8 *ie;
-
 
 	wil_dbg_misc(wil, "change_beacon, mid=%d\n", vif->mid);
 	wil_print_bcon_data(bcon);
@@ -2380,27 +2342,6 @@ static int wil_cfg80211_change_beacon(struct wiphy *wiphy,
 
 	memcpy(vif->ssid, wdev->ssid, wdev->ssid_len);
 	vif->ssid_len = wdev->ssid_len;
-
-	/* extract updated SSID from the probe response IE */
-	proberesp = _wil_cfg80211_get_proberesp_ies(bcon->probe_resp,
-						    bcon->probe_resp_len,
-						    &proberesp_len);
-	rc = _wil_cfg80211_merge_extra_ies(proberesp,
-					   proberesp_len,
-					   bcon->proberesp_ies,
-					   bcon->proberesp_ies_len,
-					   &ies, &len);
-
-	if (!rc) {
-		ie = cfg80211_find_ie(WLAN_EID_SSID, ies, len);
-		if (ie && ie[1] <= IEEE80211_MAX_SSID_LEN)
-			if (ie[1] != vif->ssid_len ||
-			    memcmp(&ie[2], vif->ssid, ie[1])) {
-				memcpy(vif->ssid, &ie[2], ie[1]);
-				vif->ssid_len = ie[1];
-				ssid_changed = true;
-			}
-	}
 
 	/* in case privacy has changed, need to restart the AP */
 	if (vif->privacy != privacy) {
@@ -2415,20 +2356,9 @@ static int wil_cfg80211_change_beacon(struct wiphy *wiphy,
 					    vif->hidden_ssid,
 					    vif->pbss);
 	} else {
-		if (ssid_changed) {
-			rc = wmi_set_ssid(vif, vif->ssid_len, vif->ssid);
-			if (rc)
-				goto out;
-		}
 		rc = _wil_cfg80211_set_ies(vif, bcon);
 	}
 
-	if (ssid_changed) {
-		wdev->ssid_len = vif->ssid_len;
-		memcpy(wdev->ssid, vif->ssid, vif->ssid_len);
-	}
-
-out:
 	return rc;
 }
 
@@ -3001,23 +2931,6 @@ wil_cfg80211_update_ft_ies(struct wiphy *wiphy, struct net_device *dev,
 	return rc;
 }
 
-static int wil_cfg80211_set_cqm_rssi_config(struct wiphy *wiphy,
-					    struct net_device *dev,
-					    s32 rssi_thold, u32 rssi_hyst)
-{
-	struct wil6210_priv *wil = wiphy_to_wil(wiphy);
-	int rc;
-
-	wil->cqm_rssi_thold = rssi_thold;
-
-	rc = wmi_set_cqm_rssi_config(wil, rssi_thold, rssi_hyst);
-	if (rc)
-		/* reset stored value upon failure */
-		wil->cqm_rssi_thold = 0;
-
-	return rc;
-}
-
 static const struct cfg80211_ops wil_cfg80211_ops = {
 	.add_virtual_intf = wil_cfg80211_add_iface,
 	.del_virtual_intf = wil_cfg80211_del_iface,
@@ -3049,7 +2962,6 @@ static const struct cfg80211_ops wil_cfg80211_ops = {
 	.start_p2p_device = wil_cfg80211_start_p2p_device,
 	.stop_p2p_device = wil_cfg80211_stop_p2p_device,
 	.set_power_mgmt = wil_cfg80211_set_power_mgmt,
-	.set_cqm_rssi_config = wil_cfg80211_set_cqm_rssi_config,
 	.suspend = wil_cfg80211_suspend,
 	.resume = wil_cfg80211_resume,
 	.sched_scan_start = wil_cfg80211_sched_scan_start,
@@ -3791,62 +3703,6 @@ static int wil_brp_set_ant_limit(struct wiphy *wiphy, struct wireless_dev *wdev,
 					 antenna_num_limit);
 }
 
-static void wil_nl_60g_fw_state_evt(struct wil6210_priv *wil)
-{
-	struct sk_buff *vendor_event = NULL;
-	struct wil_nl_60g_event *evt;
-	struct wil_nl_60g_fw_state_event *fw_state_event;
-
-	if (!wil->publish_nl_evt)
-		return;
-
-	wil_dbg_misc(wil, "report fw_state event to user-space (%d)\n",
-		     wil->fw_state);
-
-	evt = kzalloc(sizeof(*evt) + sizeof(*fw_state_event), GFP_KERNEL);
-	if (!evt)
-		return;
-
-	evt->evt_type = NL_60G_EVT_DRIVER_GENERIC;
-	evt->buf_len = sizeof(*fw_state_event);
-
-	fw_state_event = (struct wil_nl_60g_fw_state_event *)evt->buf;
-	fw_state_event->hdr.evt_id = NL_60G_GEN_EVT_FW_STATE;
-	fw_state_event->fw_state = wil->fw_state;
-
-	vendor_event = cfg80211_vendor_event_alloc(wil_to_wiphy(wil),
-						   NULL,
-						   4 + NLMSG_HDRLEN +
-						   sizeof(*evt) +
-						   sizeof(*fw_state_event),
-						   QCA_EVENT_UNSPEC_INDEX,
-						   GFP_KERNEL);
-	if (!vendor_event) {
-		wil_err(wil, "failed to allocate vendor_event\n");
-		goto out;
-	}
-
-	if (nla_put(vendor_event, WIL_ATTR_60G_BUF,
-		    sizeof(*evt) + sizeof(*fw_state_event), evt)) {
-		wil_err(wil, "failed to fill WIL_ATTR_60G_BUF\n");
-		kfree_skb(vendor_event);
-		goto out;
-	}
-
-	cfg80211_vendor_event(vendor_event, GFP_KERNEL);
-
-out:
-	kfree(evt);
-}
-
-void wil_nl_60g_fw_state_change(struct wil6210_priv *wil,
-				enum wil_fw_state fw_state)
-{
-	wil_dbg_misc(wil, "fw_state change:%d => %d", wil->fw_state, fw_state);
-	wil->fw_state = fw_state;
-	wil_nl_60g_fw_state_evt(wil);
-}
-
 static int wil_nl_60g_handle_cmd(struct wiphy *wiphy, struct wireless_dev *wdev,
 				 const void *data, int data_len)
 {
@@ -3888,7 +3744,6 @@ static int wil_nl_60g_handle_cmd(struct wiphy *wiphy, struct wireless_dev *wdev,
 
 		wil_dbg_wmi(wil, "Publish wmi event %s\n",
 			    publish ? "enabled" : "disabled");
-		wil_nl_60g_fw_state_evt(wil);
 		break;
 	case NL_60G_CMD_DEBUG:
 		if (!tb[WIL_ATTR_60G_BUF]) {

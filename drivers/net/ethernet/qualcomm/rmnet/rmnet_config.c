@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
-/* Copyright (c) 2013-2020, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2013-2019, The Linux Foundation. All rights reserved.
+ * Copyright (C) 2020 XiaoMi, Inc.
  *
  * RMNET configuration engine
  *
@@ -163,11 +164,11 @@ static int rmnet_newlink(struct net *src_net, struct net_device *dev,
 			 struct nlattr *tb[], struct nlattr *data[],
 			 struct netlink_ext_ack *extack)
 {
+	u32 data_format = RMNET_FLAGS_INGRESS_DEAGGREGATION;
 	struct net_device *real_dev;
 	int mode = RMNET_EPMODE_VND;
 	struct rmnet_endpoint *ep;
 	struct rmnet_port *port;
-	u32 data_format;
 	int err = 0;
 	u16 mux_id;
 
@@ -202,9 +203,10 @@ static int rmnet_newlink(struct net *src_net, struct net_device *dev,
 
 		flags = nla_data(data[IFLA_RMNET_FLAGS]);
 		data_format = flags->flags & flags->mask;
-		netdev_dbg(dev, "data format [0x%08X]\n", data_format);
-		port->data_format = data_format;
 	}
+
+	netdev_dbg(dev, "data format [0x%08X]\n", data_format);
+	port->data_format = data_format;
 
 	if (data[IFLA_RMNET_UL_AGG_PARAMS]) {
 		void *agg_params;
@@ -257,8 +259,6 @@ static void rmnet_dellink(struct net_device *dev, struct list_head *head)
 
 	unregister_netdevice(dev);
 
-	qmi_rmnet_qos_exit_post();
-
 	rmnet_unregister_real_device(real_dev, port);
 }
 
@@ -270,7 +270,6 @@ static void rmnet_force_unassociate_device(struct net_device *dev)
 	struct rmnet_port *port;
 	unsigned long bkt_ep;
 	LIST_HEAD(list);
-	HLIST_HEAD(cleanup_list);
 
 	if (!rmnet_is_real_dev_registered(real_dev))
 		return;
@@ -287,22 +286,13 @@ static void rmnet_force_unassociate_device(struct net_device *dev)
 		rmnet_vnd_dellink(ep->mux_id, port, ep);
 
 		hlist_del_init_rcu(&ep->hlnode);
-		hlist_add_head(&ep->hlnode, &cleanup_list);
-	}
-
-	synchronize_rcu();
-
-	hlist_for_each_entry_safe(ep, tmp_ep, &cleanup_list, hlnode) {
-		hlist_del(&ep->hlnode);
+		synchronize_rcu();
 		kfree(ep);
 	}
-
 	/* Unregistering devices in context before freeing port.
 	 * If this API becomes non-context their order should switch.
 	 */
 	unregister_netdevice_many(&list);
-
-	qmi_rmnet_qos_exit_post();
 
 	rmnet_unregister_real_device(real_dev, port);
 }
@@ -349,7 +339,7 @@ static int rmnet_rtnl_validate(struct nlattr *tb[], struct nlattr *data[],
 
 		if (data[IFLA_RMNET_UL_AGG_PARAMS]) {
 			agg_params = nla_data(data[IFLA_RMNET_UL_AGG_PARAMS]);
-			if (agg_params->agg_time < 1000000)
+			if (agg_params->agg_time < 3000000)
 				return -EINVAL;
 		}
 	}
@@ -722,17 +712,6 @@ struct net_device *rmnet_get_real_dev(void *port)
 	return NULL;
 }
 EXPORT_SYMBOL(rmnet_get_real_dev);
-
-int rmnet_get_dlmarker_info(void *port)
-{
-	if (!port)
-		return 0;
-
-	return ((struct rmnet_port *)port)->data_format &
-		(RMNET_INGRESS_FORMAT_DL_MARKER_V1 |
-		RMNET_INGRESS_FORMAT_DL_MARKER_V2);
-}
-EXPORT_SYMBOL(rmnet_get_dlmarker_info);
 
 #endif
 

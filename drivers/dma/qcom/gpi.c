@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
- * Copyright (c) 2017-2020, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2017-2019, The Linux Foundation. All rights reserved.
+ * Copyright (C) 2020 XiaoMi, Inc.
  */
 
 #include <linux/atomic.h>
@@ -1461,7 +1462,6 @@ static void gpi_process_imed_data_event(struct gpii_chan *gpii_chan,
 		(ch_ring->el_size * imed_event->tre_index);
 	struct msm_gpi_dma_async_tx_cb_param *tx_cb_param;
 	unsigned long flags;
-	u32 chid;
 
 	/*
 	 * If channel not active don't process event but let
@@ -1514,13 +1514,8 @@ static void gpi_process_imed_data_event(struct gpii_chan *gpii_chan,
 	/* make sure rp updates are immediately visible to all cores */
 	smp_wmb();
 
-	chid = imed_event->chid;
-	if (imed_event->code == MSM_GPI_TCE_EOT && gpii->ieob_set) {
-		if (chid == GPI_RX_CHAN)
-			goto gpi_free_desc;
-		else
-			return;
-	}
+	if (imed_event->code == MSM_GPI_TCE_EOT && gpii->ieob_set)
+		return;
 
 	tx_cb_param = vd->tx.callback_param;
 	if (vd->tx.callback && tx_cb_param) {
@@ -1538,7 +1533,6 @@ static void gpi_process_imed_data_event(struct gpii_chan *gpii_chan,
 		vd->tx.callback(tx_cb_param);
 	}
 
-gpi_free_desc:
 	spin_lock_irqsave(&gpii_chan->vc.lock, flags);
 	list_del(&vd->node);
 	spin_unlock_irqrestore(&gpii_chan->vc.lock, flags);
@@ -1557,7 +1551,6 @@ static void gpi_process_xfer_compl_event(struct gpii_chan *gpii_chan,
 	struct msm_gpi_dma_async_tx_cb_param *tx_cb_param;
 	struct gpi_desc *gpi_desc;
 	unsigned long flags;
-	u32 chid;
 
 	/* only process events on active channel */
 	if (unlikely(gpii_chan->pm_state != ACTIVE_STATE)) {
@@ -1602,13 +1595,8 @@ static void gpi_process_xfer_compl_event(struct gpii_chan *gpii_chan,
 	/* update must be visible to other cores */
 	smp_wmb();
 
-	chid = compl_event->chid;
-	if (compl_event->code == MSM_GPI_TCE_EOT && gpii->ieob_set) {
-		if (chid == GPI_RX_CHAN)
-			goto gpi_free_desc;
-		else
-			return;
-	}
+	if (compl_event->code == MSM_GPI_TCE_EOT && gpii->ieob_set)
+		return;
 
 	tx_cb_param = vd->tx.callback_param;
 	if (vd->tx.callback && tx_cb_param) {
@@ -1622,7 +1610,6 @@ static void gpi_process_xfer_compl_event(struct gpii_chan *gpii_chan,
 		vd->tx.callback(tx_cb_param);
 	}
 
-gpi_free_desc:
 	spin_lock_irqsave(&gpii_chan->vc.lock, flags);
 	list_del(&vd->node);
 	spin_unlock_irqrestore(&gpii_chan->vc.lock, flags);
@@ -1848,12 +1835,12 @@ static int gpi_alloc_chan(struct gpii_chan *gpii_chan, bool send_alloc_cmd)
 		{
 			gpii_chan->ch_cntxt_base_reg,
 			CNTXT_3_RING_BASE_MSB,
-			MSM_GPI_RING_PHYS_ADDR_UPPER(ring->phys_addr),
+			(u32)(ring->phys_addr >> 32),
 		},
 		{ /* program MSB of DB register with ring base */
 			gpii_chan->ch_cntxt_db_reg,
 			CNTXT_5_RING_RP_MSB - CNTXT_4_RING_RP_LSB,
-			MSM_GPI_RING_PHYS_ADDR_UPPER(ring->phys_addr),
+			(u32)(ring->phys_addr >> 32),
 		},
 		{
 			gpii->regs,
@@ -1942,13 +1929,13 @@ static int gpi_alloc_ev_chan(struct gpii *gpii)
 		{
 			gpii->ev_cntxt_base_reg,
 			CNTXT_3_RING_BASE_MSB,
-			MSM_GPI_RING_PHYS_ADDR_UPPER(ring->phys_addr),
+			(u32)(ring->phys_addr >> 32),
 		},
 		{
 			/* program db msg with ring base msb */
 			gpii->ev_cntxt_db_reg,
 			CNTXT_5_RING_RP_MSB - CNTXT_4_RING_RP_LSB,
-			MSM_GPI_RING_PHYS_ADDR_UPPER(ring->phys_addr),
+			(u32)(ring->phys_addr >> 32),
 		},
 		{
 			gpii->ev_cntxt_base_reg,

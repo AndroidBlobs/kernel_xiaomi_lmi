@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
- * Copyright (c) 2012-2020, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2012-2019, The Linux Foundation. All rights reserved.
+ * Copyright (C) 2020 XiaoMi, Inc.
  */
 
 #include <linux/clk.h>
@@ -123,10 +124,6 @@ static DECLARE_WORK(ipa3_fw_loading_work, ipa3_load_ipa_fw);
 static void ipa_dec_clients_disable_clks_on_wq(struct work_struct *work);
 static DECLARE_DELAYED_WORK(ipa_dec_clients_disable_clks_on_wq_work,
 	ipa_dec_clients_disable_clks_on_wq);
-
-static void ipa_inc_clients_enable_clks_on_wq(struct work_struct *work);
-static DECLARE_WORK(ipa_inc_clients_enable_clks_on_wq_work,
-	ipa_inc_clients_enable_clks_on_wq);
 
 static int ipa3_ioctl_add_rt_rule_v2(unsigned long arg);
 static int ipa3_ioctl_add_rt_rule_ext_v2(unsigned long arg);
@@ -1523,23 +1520,6 @@ static int ipa3_ioctl_fnr_counter_set(unsigned long arg)
 	return 0;
 }
 
-static int proc_sram_info_rqst(
-	unsigned long arg)
-{
-	struct ipa_nat_in_sram_info sram_info = { 0 };
-
-	if (ipa3_nat_get_sram_info(&sram_info))
-		return  -EFAULT;
-
-	if (copy_to_user(
-		(void __user *) arg,
-		&sram_info,
-		sizeof(struct ipa_nat_in_sram_info)))
-		return -EFAULT;
-
-	return 0;
-}
-
 static long ipa3_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 {
 	int retval = 0;
@@ -1637,7 +1617,6 @@ static long ipa3_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 			retval = -EFAULT;
 			break;
 		}
-
 		if (ipa3_nat_init_cmd(&nat_init)) {
 			retval = -EFAULT;
 			break;
@@ -1703,7 +1682,6 @@ static long ipa3_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 			retval = -EFAULT;
 			break;
 		}
-
 		if (ipa3_del_nat_table(&table_del)) {
 			retval = -EFAULT;
 			break;
@@ -1716,7 +1694,6 @@ static long ipa3_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 			retval = -EFAULT;
 			break;
 		}
-
 		if (ipa3_del_ipv6ct_table(&table_del)) {
 			retval = -EFAULT;
 			break;
@@ -2756,16 +2733,6 @@ static long ipa3_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 			IPA_CLIENT_MAX,
 			fst_switch.to_wigig);
 		break;
-
-	case IPA_IOC_GET_NAT_IN_SRAM_INFO:
-		retval = proc_sram_info_rqst(arg);
-		break;
-
-	case IPA_IOC_APP_CLOCK_VOTE:
-		retval = ipa3_app_clk_vote(
-			(enum ipa_app_clock_vote_type) arg);
-		break;
-
 	default:
 		IPA_ACTIVE_CLIENTS_DEC_SIMPLE();
 		return -ENOTTY;
@@ -3588,7 +3555,7 @@ static int ipa3_q6_set_ex_path_to_apps(void)
 	/* Set the exception path to AP */
 	for (client_idx = 0; client_idx < IPA_CLIENT_MAX; client_idx++) {
 		ep_idx = ipa3_get_ep_mapping(client_idx);
-		if (ep_idx == -1 || (ep_idx >= IPA3_MAX_NUM_PIPES))
+		if (ep_idx == -1)
 			continue;
 
 		/* disable statuses for all modem controlled prod pipes */
@@ -3873,23 +3840,22 @@ int _ipa_init_sram_v3(void)
 	if (ipa_get_hw_type() >= IPA_HW_v4_5) {
 		ipa3_sram_set_canary(ipa_sram_mmio,
 			IPA_MEM_PART(nat_tbl_ofst) - 12);
+		ipa3_sram_set_canary(ipa_sram_mmio,
+			IPA_MEM_PART(nat_tbl_ofst) - 8);
+		ipa3_sram_set_canary(ipa_sram_mmio,
+			IPA_MEM_PART(nat_tbl_ofst) - 4);
+		ipa3_sram_set_canary(ipa_sram_mmio, IPA_MEM_PART(nat_tbl_ofst));
 	}
 	if (ipa_get_hw_type() >= IPA_HW_v4_0) {
-		if (ipa_get_hw_type() < IPA_HW_v4_5) {
-			ipa3_sram_set_canary(ipa_sram_mmio,
-				IPA_MEM_PART(pdn_config_ofst) - 4);
-			ipa3_sram_set_canary(ipa_sram_mmio,
-				IPA_MEM_PART(pdn_config_ofst));
-			ipa3_sram_set_canary(ipa_sram_mmio,
-				IPA_MEM_PART(stats_quota_q6_ofst) - 4);
-			ipa3_sram_set_canary(ipa_sram_mmio,
-				IPA_MEM_PART(stats_quota_q6_ofst));
-		} else {
-			ipa3_sram_set_canary(ipa_sram_mmio,
-				IPA_MEM_PART(stats_quota_q6_ofst) - 12);
-		}
+		ipa3_sram_set_canary(ipa_sram_mmio,
+			IPA_MEM_PART(pdn_config_ofst) - 4);
+		ipa3_sram_set_canary(ipa_sram_mmio,
+			IPA_MEM_PART(pdn_config_ofst));
+		ipa3_sram_set_canary(ipa_sram_mmio,
+			IPA_MEM_PART(stats_quota_ofst) - 4);
+		ipa3_sram_set_canary(ipa_sram_mmio,
+			IPA_MEM_PART(stats_quota_ofst));
 	}
-
 	if (ipa_get_hw_type() <= IPA_HW_v3_5 ||
 		ipa_get_hw_type() >= IPA_HW_v4_5) {
 		ipa3_sram_set_canary(ipa_sram_mmio,
@@ -4687,12 +4653,6 @@ long compat_ipa3_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 	case IPA_IOC_MDFY_RT_RULE32:
 		cmd = IPA_IOC_MDFY_RT_RULE;
 		break;
-	case IPA_IOC_GET_NAT_IN_SRAM_INFO32:
-		cmd = IPA_IOC_GET_NAT_IN_SRAM_INFO;
-		break;
-	case IPA_IOC_APP_CLOCK_VOTE32:
-		cmd = IPA_IOC_APP_CLOCK_VOTE;
-		break;
 	case IPA_IOC_COMMIT_HDR:
 	case IPA_IOC_RESET_HDR:
 	case IPA_IOC_COMMIT_RT:
@@ -4831,8 +4791,6 @@ void _ipa_disable_clks_v3_0(void)
  */
 void ipa3_disable_clks(void)
 {
-	int type;
-
 	if (ipa3_ctx->ipa3_hw_mode != IPA_HW_MODE_NORMAL) {
 		IPAERR("not supported in this mode\n");
 		return;
@@ -4840,29 +4798,13 @@ void ipa3_disable_clks(void)
 
 	IPADBG("disabling IPA clocks and bus voting\n");
 
-	/*
-	 * We see a NoC error on GSI on this flag sequence.
-	 * Need to set this flag first before clock off.
-	 */
-	atomic_set(&ipa3_ctx->ipa_clk_vote, 0);
-
-	/*
-	 * If there is still pending gsi irq, this indicate
-	 * issue on GSI FW side. We need to capture before
-	 * turn off the ipa clock.
-	 */
-	type = gsi_pending_irq_type();
-	if (type) {
-		IPAERR("unexpected gsi irq type: %d\n", type);
-		ipa_assert();
-	}
-
 	ipa3_ctx->ctrl->ipa3_disable_clks();
 
 	ipa_pm_set_clock_index(0);
 
 	if (msm_bus_scale_client_update_request(ipa3_ctx->ipa_bus_hdl, 0))
 		WARN(1, "bus scaling failed");
+	atomic_set(&ipa3_ctx->ipa_clk_vote, 0);
 }
 
 /**
@@ -5035,12 +4977,6 @@ void ipa3_inc_client_enable_clks(struct ipa_active_client_logging_info *id)
 	mutex_unlock(&ipa3_ctx->ipa3_active_clients.mutex);
 }
 
-void ipa3_handle_gsi_differ_irq(void)
-{
-	queue_work(ipa3_ctx->power_mgmt_wq,
-		&ipa_inc_clients_enable_clks_on_wq_work);
-}
-
 /**
  * ipa3_active_clks_status() - update the current msm bus clock vote
  * status
@@ -5155,13 +5091,6 @@ void ipa3_dec_client_disable_clks(struct ipa_active_client_logging_info *id)
 static void ipa_dec_clients_disable_clks_on_wq(struct work_struct *work)
 {
 	__ipa3_dec_client_disable_clks();
-}
-
-static void ipa_inc_clients_enable_clks_on_wq(struct work_struct *work)
-{
-	ipa3_enable_clks();
-	IPAERR("unexpected clk access, clock on IPA to save reg");
-	ipa_assert();
 }
 
 /**
@@ -5857,12 +5786,6 @@ static int ipa3_post_init(const struct ipa3_plat_drv_res *resource_p,
 		goto fail_dma_task;
 	}
 
-	result = ipa3_allocate_coal_close_frame();
-	if (result) {
-		IPAERR("failed to allocate coal frame cmd\n");
-		goto fail_coal_frame;
-	}
-
 	if (ipa3_nat_ipv6ct_init_devices()) {
 		IPAERR("unable to init NAT and IPv6CT devices\n");
 		result = -ENODEV;
@@ -5959,7 +5882,6 @@ static int ipa3_post_init(const struct ipa3_plat_drv_res *resource_p,
 	gsi_props.req_clk_cb = NULL;
 	gsi_props.rel_clk_cb = NULL;
 	gsi_props.clk_status_cb = ipa3_active_clks_status;
-	gsi_props.enable_clk_bug_on = ipa3_handle_gsi_differ_irq;
 
 	if (ipa3_ctx->ipa_config_is_mhi) {
 		gsi_props.mhi_er_id_limits_valid = true;
@@ -6068,8 +5990,6 @@ fail_init_interrupts:
 fail_allok_pkt_init:
 	ipa3_nat_ipv6ct_destroy_devices();
 fail_nat_ipv6ct_init_dev:
-	ipa3_free_coal_close_frame();
-fail_coal_frame:
 	ipa3_free_dma_task_for_gsi();
 fail_dma_task:
 fail_init_hw:
@@ -6178,19 +6098,10 @@ static void ipa3_load_ipa_fw(struct work_struct *work)
 
 	if (ipa3_ctx->ipa3_hw_mode != IPA_HW_MODE_EMULATION &&
 	    ((ipa3_ctx->platform_type != IPA_PLAT_TYPE_MDM) ||
-	    (ipa3_ctx->ipa_hw_type >= IPA_HW_v3_5))) {
-		/* some targets sharing same lunch option but
-		 * using different signing images, adding support to
-		 * load specific FW image to based on dt entry.
-		 */
-		if (ipa3_ctx->gsi_fw_file_name)
-			result = ipa3_pil_load_ipa_fws(
-						ipa3_ctx->gsi_fw_file_name);
-		else
-			result = ipa3_pil_load_ipa_fws(IPA_SUBSYSTEM_NAME);
-	} else {
+	    (ipa3_ctx->ipa_hw_type >= IPA_HW_v3_5)))
+		result = ipa3_pil_load_ipa_fws(IPA_SUBSYSTEM_NAME);
+	else
 		result = ipa3_manual_load_ipa_fws();
-	}
 
 	IPA_ACTIVE_CLIENTS_DEC_SIMPLE();
 
@@ -6216,11 +6127,7 @@ static void ipa3_load_ipa_fw(struct work_struct *work)
 		/* Unvoting will happen when uC loaded event received. */
 		ipa3_proxy_clk_vote();
 
-		if (ipa3_ctx->uc_fw_file_name)
-			result = ipa3_pil_load_ipa_fws(
-						ipa3_ctx->uc_fw_file_name);
-		else
-			result = ipa3_pil_load_ipa_fws(IPA_UC_SUBSYSTEM_NAME);
+		result = ipa3_pil_load_ipa_fws(IPA_UC_SUBSYSTEM_NAME);
 		if (result) {
 			IPAERR("IPA uC loading process has failed result=%d\n",
 				result);
@@ -6572,34 +6479,6 @@ static int ipa3_pre_init(const struct ipa3_plat_drv_res *resource_p,
 	ipa3_ctx->do_ram_collection_on_crash =
 		resource_p->do_ram_collection_on_crash;
 	ipa3_ctx->lan_rx_napi_enable = resource_p->lan_rx_napi_enable;
-
-	if (resource_p->gsi_fw_file_name) {
-		ipa3_ctx->gsi_fw_file_name =
-			kzalloc(((strlen(resource_p->gsi_fw_file_name)+1) *
-				sizeof(const char)), GFP_KERNEL);
-		if (ipa3_ctx->gsi_fw_file_name == NULL) {
-			IPAERR_RL("Failed to alloc GSI FW file name\n");
-			result = -ENOMEM;
-			goto fail_gsi_file_alloc;
-		}
-		memcpy(ipa3_ctx->gsi_fw_file_name,
-				(void const *)resource_p->gsi_fw_file_name,
-				strlen(resource_p->gsi_fw_file_name));
-	}
-
-	if (resource_p->uc_fw_file_name) {
-		ipa3_ctx->uc_fw_file_name =
-			kzalloc(((strlen(resource_p->uc_fw_file_name)+1) *
-				sizeof(const char)), GFP_KERNEL);
-		if (ipa3_ctx->uc_fw_file_name == NULL) {
-			IPAERR_RL("Failed to alloc uC FW file name\n");
-			result = -ENOMEM;
-			goto fail_uc_file_alloc;
-		}
-		memcpy(ipa3_ctx->uc_fw_file_name,
-			(void const *)resource_p->uc_fw_file_name,
-			strlen(resource_p->uc_fw_file_name));
-	}
 
 	if (ipa3_ctx->secure_debug_check_action == USE_SCM) {
 		if (ipa_is_mem_dump_allowed())
@@ -7016,10 +6895,7 @@ static int ipa3_pre_init(const struct ipa3_plat_drv_res *resource_p,
 			ipa3_lan_poll, NAPI_WEIGHT);
 	}
 
-	mutex_init(&ipa3_ctx->app_clock_vote.mutex);
-
 	return 0;
-
 fail_cdev_add:
 fail_gsi_pre_fw_load_init:
 	ipa3_dma_shutdown();
@@ -7085,9 +6961,6 @@ fail_mem_ctrl:
 fail_tz_unlock_reg:
 	if (ipa3_ctx->logbuf)
 		ipc_log_context_destroy(ipa3_ctx->logbuf);
-fail_uc_file_alloc:
-	kfree(ipa3_ctx->gsi_fw_file_name);
-fail_gsi_file_alloc:
 	kfree(ipa3_ctx);
 	ipa3_ctx = NULL;
 fail_mem_ctx:
@@ -7373,18 +7246,7 @@ static int get_ipa_dts_configuration(struct platform_device *pdev,
 	IPADBG(": Enable LAN rx NAPI = %s\n",
 		ipa_drv_res->lan_rx_napi_enable
 		? "True" : "False");
-	result = of_property_read_string(pdev->dev.of_node,
-			"qcom,use-gsi-ipa-fw", &ipa_drv_res->gsi_fw_file_name);
-	if (!result)
-		IPADBG("GSI IPA FW name %s\n", ipa_drv_res->gsi_fw_file_name);
-	else
-		IPADBG("GSI IPA FW file not defined. Using default one\n");
-	result = of_property_read_string(pdev->dev.of_node,
-			"qcom,use-uc-ipa-fw", &ipa_drv_res->uc_fw_file_name);
-	if (!result)
-		IPADBG("uC IPA FW name = %s\n", ipa_drv_res->uc_fw_file_name);
-	else
-		IPADBG("uC IPA FW file not defined. Using default one\n");
+
 	/* Get IPA wrapper address */
 	resource = platform_get_resource_byname(pdev, IORESOURCE_MEM,
 			"ipa-base");

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
- * Copyright (c) 2012-2020, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2012-2019, The Linux Foundation. All rights reserved.
+ * Copyright (C) 2020 XiaoMi, Inc.
  */
 
 #include <linux/delay.h>
@@ -1329,9 +1330,11 @@ int ipa3_teardown_sys_pipe(u32 clnt_hdl)
 		return result;
 	}
 
-	do {
-		usleep_range(95, 105);
-	} while (atomic_read(&ep->sys->curr_polling_state));
+	if (ep->sys->napi_obj) {
+		do {
+			usleep_range(95, 105);
+		} while (atomic_read(&ep->sys->curr_polling_state));
+	}
 
 	if (IPA_CLIENT_IS_CONS(ep->client))
 		cancel_delayed_work_sync(&ep->sys->replenish_rx_work);
@@ -1781,7 +1784,6 @@ static void ipa3_wq_handle_rx(struct work_struct *work)
 	if (sys->napi_obj) {
 		ipa_pm_activate_sync(sys->pm_hdl);
 		napi_schedule(sys->napi_obj);
-		IPA_STATS_INC_CNT(sys->napi_sch_cnt);
 	} else
 		ipa3_handle_rx(sys);
 }
@@ -2018,6 +2020,7 @@ static void ipa3_replenish_rx_page_recycle(struct ipa3_sys_context *sys)
 			rx_pkt = sys->repl->cache[curr_wq];
 			curr_wq = (++curr_wq == sys->repl->capacity) ?
 								 0 : curr_wq;
+			atomic_set(&sys->repl->head_idx, curr_wq);
 		}
 
 		dma_sync_single_for_device(ipa3_ctx->pdev,
@@ -2055,7 +2058,6 @@ static void ipa3_replenish_rx_page_recycle(struct ipa3_sys_context *sys)
 	if (likely(ret == GSI_STATUS_SUCCESS)) {
 		/* ensure write is done before setting head index */
 		mb();
-		atomic_set(&sys->repl->head_idx, curr_wq);
 		atomic_set(&sys->page_recycle_repl->head_idx, curr);
 		sys->len = rx_len_cached;
 	} else {
@@ -2808,14 +2810,8 @@ begin:
 		case IPAHAL_PKT_STATUS_OPCODE_PACKET:
 		case IPAHAL_PKT_STATUS_OPCODE_SUSPENDED_PACKET:
 		case IPAHAL_PKT_STATUS_OPCODE_PACKET_2ND_PASS:
-			break;
 		case IPAHAL_PKT_STATUS_OPCODE_NEW_FRAG_RULE:
-			IPAERR_RL("Frag packets received on lan consumer\n");
-			IPAERR_RL("STATUS opcode=%d src=%d dst=%d src ip=%x\n",
-				status.status_opcode, status.endp_src_idx,
-				status.endp_dest_idx, status.src_ip_addr);
-			skb_pull(skb, pkt_status_sz);
-			continue;
+			break;
 		default:
 			IPAERR_RL("unsupported opcode(%d)\n",
 				status.status_opcode);
@@ -3267,13 +3263,7 @@ static void ipa3_recycle_rx_wrapper(struct ipa3_rx_pkt_wrapper *rx_pkt)
 
 static void ipa3_recycle_rx_page_wrapper(struct ipa3_rx_pkt_wrapper *rx_pkt)
 {
-	struct ipa_rx_page_data rx_page;
-
-	rx_page = rx_pkt->page_data;
-
-	/* Free rx_wrapper only for tmp alloc pages*/
-	if (rx_page.is_tmp_alloc)
-		kmem_cache_free(ipa3_ctx->rx_pkt_wrapper_cache, rx_pkt);
+	/* no-op */
 }
 
 /**
@@ -3388,17 +3378,10 @@ static struct sk_buff *handle_page_completion(struct gsi_chan_xfer_notify
 		IPAERR("update_truesize not supported\n");
 
 	if (notify->veid >= GSI_VEID_MAX) {
-		IPAERR("notify->veid > GSI_VEID_MAX\n");
-		if (!rx_page.is_tmp_alloc) {
-			init_page_count(rx_page.page);
-		} else {
-			dma_unmap_page(ipa3_ctx->pdev, rx_page.dma_addr,
-					rx_pkt->len, DMA_FROM_DEVICE);
-			__free_pages(rx_pkt->page_data.page,
-							IPA_WAN_PAGE_ORDER);
-		}
 		rx_pkt->sys->free_rx_wrapper(rx_pkt);
-		IPA_STATS_INC_CNT(ipa3_ctx->stats.rx_page_drop_cnt);
+		if (!rx_page.is_tmp_alloc)
+			init_page_count(rx_page.page);
+		IPAERR("notify->veid > GSI_VEID_MAX\n");
 		return NULL;
 	}
 
@@ -3412,18 +3395,10 @@ static struct sk_buff *handle_page_completion(struct gsi_chan_xfer_notify
 		sys->ep->client == IPA_CLIENT_APPS_LAN_CONS) {
 		rx_skb = alloc_skb(0, GFP_ATOMIC);
 		if (unlikely(!rx_skb)) {
-			IPAERR("skb alloc failure\n");
-			list_del(&rx_pkt->link);
-			if (!rx_page.is_tmp_alloc) {
-				init_page_count(rx_page.page);
-			} else {
-				dma_unmap_page(ipa3_ctx->pdev, rx_page.dma_addr,
-					rx_pkt->len, DMA_FROM_DEVICE);
-				__free_pages(rx_pkt->page_data.page,
-							IPA_WAN_PAGE_ORDER);
-			}
 			rx_pkt->sys->free_rx_wrapper(rx_pkt);
-			IPA_STATS_INC_CNT(ipa3_ctx->stats.rx_page_drop_cnt);
+			if (!rx_page.is_tmp_alloc)
+				init_page_count(rx_page.page);
+			IPAERR("skb alloc failure\n");
 			return NULL;
 		}
 	/* go over the list backward to save computations on updating length */
@@ -4365,7 +4340,6 @@ void __ipa_gsi_irq_rx_scedule_poll(struct ipa3_sys_context *sys)
 	clk_off = ipa_pm_activate(sys->pm_hdl);
 	if (!clk_off && sys->napi_obj) {
 		napi_schedule(sys->napi_obj);
-		IPA_STATS_INC_CNT(sys->napi_sch_cnt);
 		return;
 	}
 	queue_work(sys->wq, &sys->work);
@@ -5001,23 +4975,15 @@ start_poll:
 	}
 	cnt += weight - remain_aggr_weight * IPA_WAN_AGGR_PKT_CNT;
 	/* call repl_hdlr before napi_reschedule / napi_complete */
-	ep->sys->repl_hdlr(ep->sys);
-
-	/* When not able to replenish enough descriptors pipe wait
-	 * until minimum number descripotrs to replish.
-	 */
-	if (cnt < weight && ep->sys->len > IPA_DEFAULT_SYS_YELLOW_WM) {
+	if (cnt)
+		ep->sys->repl_hdlr(ep->sys);
+	if (cnt < weight) {
 		napi_complete(ep->sys->napi_obj);
-		IPA_STATS_INC_CNT(ep->sys->napi_comp_cnt);
 		ret = ipa3_rx_switch_to_intr_mode(ep->sys);
 		if (ret == -GSI_STATUS_PENDING_IRQ &&
 				napi_reschedule(ep->sys->napi_obj))
 			goto start_poll;
 		ipa_pm_deferred_deactivate(ep->sys->pm_hdl);
-	} else {
-		cnt = weight;
-		IPADBG_LOW("Client = %d not replenished free descripotrs\n",
-				ep->client);
 	}
 	return cnt;
 }

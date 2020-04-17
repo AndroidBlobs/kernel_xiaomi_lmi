@@ -755,12 +755,6 @@ enum wil_sta_status {
 	wil_sta_connected = 2,
 };
 
-enum wil_rekey_state {
-	WIL_REKEY_IDLE = 0,
-	WIL_REKEY_M3_RECEIVED = 1,
-	WIL_REKEY_WAIT_M4_SENT = 2,
-};
-
 /**
  * struct wil_sta_info - data for peer
  *
@@ -912,10 +906,6 @@ struct wil6210_vif {
 	int net_queue_stopped; /* netif_tx_stop_all_queues invoked */
 	bool fw_stats_ready; /* per-cid statistics are ready inside sta_info */
 	u64 fw_stats_tsf; /* measurement timestamp */
-
-	/* PTK rekey race prevention, this is relevant to station mode only */
-	enum wil_rekey_state ptk_rekey_state;
-	struct work_struct enable_tx_key_worker;
 };
 
 /**
@@ -958,17 +948,6 @@ struct wil_ftm_offsets {
 	u8 enabled;
 	unsigned int tx_offset;
 	unsigned int rx_offset;
-};
-
-enum wil_fw_state {
-	/* When driver loaded with debug_fw the FW state is unknown */
-	WIL_FW_STATE_UNKNOWN,
-	WIL_FW_STATE_DOWN, /* FW not loaded or not ready yet */
-	WIL_FW_STATE_READY,/* FW is ready*/
-	/* Detected FW error before FW sent ready indication */
-	WIL_FW_STATE_ERROR_BEFORE_READY,
-	/* Detected FW error after FW sent ready indication */
-	WIL_FW_STATE_ERROR,
 };
 
 struct wil6210_priv {
@@ -1032,7 +1011,6 @@ struct wil6210_priv {
 	 */
 	spinlock_t wmi_ev_lock;
 	spinlock_t net_queue_lock; /* guarding stop/wake netif queue */
-	spinlock_t eap_lock; /* guarding access to eap rekey fields */
 	struct napi_struct napi_rx;
 	struct napi_struct napi_tx;
 	struct net_device napi_ndev; /* dummy net_device serving all VIFs */
@@ -1067,7 +1045,6 @@ struct wil6210_priv {
 	u8 wakeup_trigger;
 	struct wil_suspend_stats suspend_stats;
 	struct wil_debugfs_data dbg_data;
-	/* set to WIL_EDMG_DISABLE to force disable EDMG */
 	u8 force_edmg_channel;
 	bool tx_latency; /* collect TX latency measurements */
 	size_t tx_latency_res; /* bin resolution in usec */
@@ -1136,12 +1113,10 @@ struct wil6210_priv {
 	u32 max_agg_wsize;
 	u32 max_ampdu_size;
 
-	enum wil_fw_state fw_state;
 	struct work_struct pci_linkdown_recovery_worker;
 	void *ipa_handle;
 
 	u32 tx_reserved_entries; /* Used only in Talyn code-path */
-	s32 cqm_rssi_thold;
 };
 
 #define wil_to_wiphy(i) (i->wiphy)
@@ -1302,7 +1277,6 @@ int __wil_down(struct wil6210_priv *wil);
 void wil_refresh_fw_capabilities(struct wil6210_priv *wil);
 void wil_mbox_ring_le2cpus(struct wil6210_mbox_ring *r);
 int wil_find_cid(struct wil6210_priv *wil, u8 mid, const u8 *mac);
-int wil_find_cid_by_idx(struct wil6210_priv *wil, u8 mid, int idx);
 void wil_set_ethtoolops(struct net_device *ndev);
 int wil_vr_update_profile(struct wil6210_priv *wil, u8 profile);
 
@@ -1401,9 +1375,6 @@ int wil_cfg80211_mgmt_tx(struct wiphy *wiphy, struct wireless_dev *wdev,
 			 struct cfg80211_mgmt_tx_params *params,
 			 u64 *cookie);
 void wil_cfg80211_ap_recovery(struct wil6210_priv *wil);
-
-void wil_nl_60g_fw_state_change(struct wil6210_priv *wil,
-				enum wil_fw_state fw_state);
 int wil_cfg80211_iface_combinations_from_fw(
 	struct wil6210_priv *wil,
 	const struct wil_fw_record_concurrency *conc);
@@ -1455,7 +1426,6 @@ void wil6210_disconnect_complete(struct wil6210_vif *vif, const u8 *bssid,
 void wil_probe_client_flush(struct wil6210_vif *vif);
 void wil_probe_client_worker(struct work_struct *work);
 void wil_disconnect_worker(struct work_struct *work);
-void wil_enable_tx_key_worker(struct work_struct *work);
 
 void wil_init_txrx_ops(struct wil6210_priv *wil);
 
@@ -1475,8 +1445,6 @@ void wil_update_net_queues_bh(struct wil6210_priv *wil, struct wil6210_vif *vif,
 			      struct wil_ring *ring, bool check_stop);
 netdev_tx_t wil_start_xmit(struct sk_buff *skb, struct net_device *ndev);
 int wil_tx_complete(struct wil6210_vif *vif, int ringid);
-void wil_tx_complete_handle_eapol(struct wil6210_vif *vif,
-				  struct sk_buff *skb);
 void wil6210_unmask_irq_tx(struct wil6210_priv *wil);
 void wil6210_unmask_irq_tx_edma(struct wil6210_priv *wil);
 
@@ -1574,8 +1542,4 @@ void update_supported_bands(struct wil6210_priv *wil);
 int wmi_reset_spi_slave(struct wil6210_priv *wil);
 
 void wil_clear_fw_log_addr(struct wil6210_priv *wil);
-int wmi_set_cqm_rssi_config(struct wil6210_priv *wil,
-			    s32 rssi_thold, u32 rssi_hyst);
-int wmi_set_fst_config(struct wil6210_priv *wil, const u8 *bssid, u8 enabled,
-		       u8 entry_mcs, u8 exit_mcs, u8 slevel);
 #endif /* __WIL6210_H__ */

@@ -387,13 +387,6 @@ static int wil_platform_rop_notify(void *wil_handle,
 		set_bit(wil_status_resetting, wil->status);
 		set_bit(wil_status_pci_linkdown, wil->status);
 
-		if (wil->fw_state == WIL_FW_STATE_READY)
-			wil_nl_60g_fw_state_change(wil,
-						   WIL_FW_STATE_ERROR);
-		else
-			wil_nl_60g_fw_state_change(wil,
-					WIL_FW_STATE_ERROR_BEFORE_READY);
-
 		schedule_work(&wil->pci_linkdown_recovery_worker);
 		break;
 	default:
@@ -543,7 +536,7 @@ static int wil_pcie_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 		mutex_unlock(&wil->mutex);
 		if (rc) {
 			wil_err(wil, "failed to load WMI only FW\n");
-			/* ignore the error to allow debugging */
+			goto if_remove;
 		}
 	}
 
@@ -564,6 +557,8 @@ static int wil_pcie_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 
 	return 0;
 
+if_remove:
+	wil_if_remove(wil);
 bus_disable:
 	wil_if_pcie_disable(wil);
 err_iounmap:
