@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
-/* Copyright (c) 2008-2020, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2008-2019, The Linux Foundation. All rights reserved.
+ * Copyright (C) 2020 XiaoMi, Inc.
  */
 
 #include <linux/slab.h>
@@ -14,7 +15,6 @@
 #include <linux/sched.h>
 #include <linux/ratelimit.h>
 #include <linux/timer.h>
-#include <linux/jiffies.h>
 #include <linux/sched/task.h>
 #ifdef CONFIG_DIAG_OVER_USB
 #include <linux/usb/usbdiag.h>
@@ -254,20 +254,18 @@ void check_drain_timer(void)
 	}
 }
 
-static int diag_add_client(int i, struct file *file)
+void diag_add_client(int i, struct file *file)
 {
-	struct diagchar_priv *diagpriv_data = NULL;
+	struct diagchar_priv *diagpriv_data;
 
+	driver->client_map[i].pid = current->tgid;
 	diagpriv_data = kmalloc(sizeof(struct diagchar_priv),
 							GFP_KERNEL);
-	if (!diagpriv_data)
-		return -ENOMEM;
-	driver->client_map[i].pid = current->tgid;
-	diagpriv_data->pid = current->tgid;
+	if (diagpriv_data)
+		diagpriv_data->pid = current->tgid;
 	file->private_data = diagpriv_data;
 	strlcpy(driver->client_map[i].name, current->comm, 20);
 	driver->client_map[i].name[19] = '\0';
-	return 0;
 }
 
 static void diag_mempool_init(void)
@@ -303,31 +301,18 @@ static void diag_mempool_exit(void)
 
 static int diagchar_open(struct inode *inode, struct file *file)
 {
-	int i = 0, ret = 0;
+	int i = 0;
 	void *temp;
 
 	if (driver) {
 		mutex_lock(&driver->diagchar_mutex);
 
-		for (i = 0; i < driver->num_clients; i++) {
-			if (driver->client_map[i].pid == current->tgid) {
-				pr_err_ratelimited("diag: Client already present current->tgid: %d\n",
-					current->tgid);
-				mutex_unlock(&driver->diagchar_mutex);
-				return -EEXIST;
-			}
-		}
 		for (i = 0; i < driver->num_clients; i++)
 			if (driver->client_map[i].pid == 0)
 				break;
 
 		if (i < driver->num_clients) {
-			ret = diag_add_client(i, file);
-			if (ret < 0) {
-				mutex_unlock(&driver->diagchar_mutex);
-				pr_err_ratelimited("diag: Insufficient memory for adding new client\n");
-				return ret;
-			}
+			diag_add_client(i, file);
 		} else {
 			if (i < THRESHOLD_CLIENT_LIMIT) {
 				driver->num_clients++;
@@ -345,9 +330,7 @@ static int diagchar_open(struct inode *inode, struct file *file)
 					goto fail;
 				else
 					driver->data_ready = temp;
-				ret = diag_add_client(i, file);
-				if (ret < 0)
-					goto fail;
+				diag_add_client(i, file);
 			} else {
 				mutex_unlock(&driver->diagchar_mutex);
 				pr_err_ratelimited("diag: Max client limit for DIAG reached\n");
@@ -384,7 +367,7 @@ static int diagchar_open(struct inode *inode, struct file *file)
 fail:
 	driver->num_clients--;
 	mutex_unlock(&driver->diagchar_mutex);
-	pr_err_ratelimited("diag: Insufficient memory for new client\n");
+	pr_err_ratelimited("diag: Insufficient memory for new client");
 	return -ENOMEM;
 }
 
@@ -537,23 +520,8 @@ static int diag_remove_client_entry(struct file *file)
 		return -EINVAL;
 	}
 
-	mutex_lock(&driver->diagchar_mutex);
 	diagpriv_data = file->private_data;
-	for (i = 0; i < driver->num_clients; i++)
-		if (diagpriv_data && diagpriv_data->pid ==
-			driver->client_map[i].pid)
-			break;
-	if (i == driver->num_clients) {
-		DIAG_LOG(DIAG_DEBUG_USERSPACE,
-			"pid %d, not present in client map\n",
-			diagpriv_data->pid);
-		mutex_unlock(&driver->diagchar_mutex);
-		mutex_unlock(&driver->diag_file_mutex);
-		return -EINVAL;
-	}
-	DIAG_LOG(DIAG_DEBUG_USERSPACE, "diag: %s process exit with pid = %d\n",
-		driver->client_map[i].name, diagpriv_data->pid);
-	mutex_unlock(&driver->diagchar_mutex);
+
 	/*
 	 * clean up any DCI registrations, if this is a DCI client
 	 * This will specially help in case of ungraceful exit of any DCI client
@@ -561,27 +529,32 @@ static int diag_remove_client_entry(struct file *file)
 	 */
 	mutex_lock(&driver->dci_mutex);
 	do {
-		dci_entry = dci_lookup_client_entry_pid(diagpriv_data->pid);
+		dci_entry = dci_lookup_client_entry_pid(current->tgid);
 		if (dci_entry)
 			diag_dci_deinit_client(dci_entry);
 	} while (dci_entry);
 	mutex_unlock(&driver->dci_mutex);
 
-	diag_close_logging_process(diagpriv_data->pid);
+	diag_close_logging_process(current->tgid);
 
 	/* Delete the pkt response table entry for the exiting process */
-	diag_cmd_remove_reg_by_pid(diagpriv_data->pid);
+	diag_cmd_remove_reg_by_pid(current->tgid);
 
 	mutex_lock(&driver->diagchar_mutex);
 	driver->ref_count--;
 	if (driver->ref_count == 0)
 		diag_mempool_exit();
 
-	driver->client_map[i].pid = 0;
-	kfree(diagpriv_data);
-	diagpriv_data = NULL;
-	file->private_data = 0;
-
+	for (i = 0; i < driver->num_clients; i++) {
+		if (diagpriv_data && diagpriv_data->pid ==
+						driver->client_map[i].pid) {
+			driver->client_map[i].pid = 0;
+			kfree(diagpriv_data);
+			diagpriv_data = NULL;
+			file->private_data = 0;
+			break;
+		}
+	}
 	mutex_unlock(&driver->diagchar_mutex);
 	mutex_unlock(&driver->diag_file_mutex);
 	return 0;
@@ -590,6 +563,8 @@ static int diagchar_close(struct inode *inode, struct file *file)
 {
 	int ret;
 
+	DIAG_LOG(DIAG_DEBUG_USERSPACE, "diag: %s process exit with pid = %d\n",
+		current->comm, current->tgid);
 	ret = diag_remove_client_entry(file);
 
 	return ret;
@@ -2063,9 +2038,6 @@ static int diag_ioctl_lsm_deinit(void)
 	if (!(driver->data_ready[i] & DEINIT_TYPE)) {
 		driver->data_ready[i] |= DEINIT_TYPE;
 		atomic_inc(&driver->data_ready_notif[i]);
-		DIAG_LOG(DIAG_DEBUG_USERSPACE,
-			"Setting DEINIT_TYPE for pid: %d\n",
-			current->tgid);
 	}
 	mutex_unlock(&driver->diagchar_mutex);
 	wake_up_interruptible(&driver->wait_q);
@@ -3092,7 +3064,7 @@ long diagchar_ioctl(struct file *filp,
 static int diag_process_apps_data_hdlc(unsigned char *buf, int len,
 				       int pkt_type)
 {
-	int err = 0, wait_err = 0;
+	int err = 0;
 	int ret = PKT_DROP;
 	struct diag_apps_data_t *data = &hdlc_data;
 	struct diag_send_desc_type send = { NULL, NULL, DIAG_STATE_START, 0 };
@@ -3123,15 +3095,8 @@ static int diag_process_apps_data_hdlc(unsigned char *buf, int len,
 	send.terminate = 1;
 
 wait_for_buffer:
-	wait_err = wait_event_interruptible_timeout(driver->hdlc_wait_q,
-			(data->flushed == 0),
-			msecs_to_jiffies(PKT_PROCESS_TIMEOUT));
-	if (wait_err <= 0) {
-		DIAG_LOG(DIAG_DEBUG_USERSPACE,
-		"diag: Timeout while waiting for hdlc buffer to be flushed, err: %d\n",
-		wait_err);
-		return PKT_DROP;
-	}
+	wait_event_interruptible(driver->hdlc_wait_q,
+			(data->flushed == 0));
 	spin_lock_irqsave(&driver->diagmem_lock, flags);
 	if (data->flushed) {
 		spin_unlock_irqrestore(&driver->diagmem_lock, flags);
@@ -3182,16 +3147,8 @@ wait_for_buffer:
 			goto fail_free_buf;
 		}
 wait_for_agg_buff:
-		wait_err = wait_event_interruptible_timeout(driver->hdlc_wait_q,
-				(data->flushed == 0),
-				msecs_to_jiffies(PKT_PROCESS_TIMEOUT));
-		if (wait_err <= 0) {
-			DIAG_LOG(DIAG_DEBUG_USERSPACE,
-			"diag: Timeout while waiting for hdlc aggregation buffer to be flushed, err: %d\n",
-			wait_err);
-			return PKT_DROP;
-		}
-
+		wait_event_interruptible(driver->hdlc_wait_q,
+			(data->flushed == 0));
 		spin_lock_irqsave(&driver->diagmem_lock, flags);
 		if (data->flushed) {
 			spin_unlock_irqrestore(&driver->diagmem_lock, flags);
@@ -3249,7 +3206,7 @@ fail_ret:
 static int diag_process_apps_data_non_hdlc(unsigned char *buf, int len,
 					   int pkt_type)
 {
-	int err = 0, wait_err = 0;
+	int err = 0;
 	int ret = PKT_DROP;
 	struct diag_pkt_frame_t header;
 	struct diag_apps_data_t *data = &non_hdlc_data;
@@ -3267,16 +3224,8 @@ static int diag_process_apps_data_non_hdlc(unsigned char *buf, int len,
 		return -EIO;
 	}
 wait_for_buffer:
-	wait_err = wait_event_interruptible_timeout(driver->hdlc_wait_q,
-					(data->flushed == 0),
-					msecs_to_jiffies(PKT_PROCESS_TIMEOUT));
-	if (wait_err <= 0) {
-		DIAG_LOG(DIAG_DEBUG_USERSPACE,
-		"diag: Timeout while waiting for non-hdlc buffer to be flushed, err: %d\n",
-		wait_err);
-		return PKT_DROP;
-	}
-
+	wait_event_interruptible(driver->hdlc_wait_q,
+			(data->flushed == 0));
 	spin_lock_irqsave(&driver->diagmem_lock, flags);
 	if (data->flushed) {
 		spin_unlock_irqrestore(&driver->diagmem_lock, flags);
@@ -3675,12 +3624,9 @@ static ssize_t diagchar_read(struct file *file, char __user *buf, size_t count,
 	int proc = 0;
 
 	mutex_lock(&driver->diagchar_mutex);
-	for (i = 0; i < driver->num_clients; i++) {
-		if (driver->client_map[i].pid == current->tgid) {
+	for (i = 0; i < driver->num_clients; i++)
+		if (driver->client_map[i].pid == current->tgid)
 			index = i;
-			break;
-		}
-	}
 	mutex_unlock(&driver->diagchar_mutex);
 
 	if (index == -1) {
@@ -3760,9 +3706,6 @@ static ssize_t diagchar_read(struct file *file, char __user *buf, size_t count,
 		COPY_USER_SPACE_OR_ERR(buf, data_type, 4);
 		if (ret == -EFAULT)
 			goto exit;
-		DIAG_LOG(DIAG_DEBUG_USERSPACE,
-			"Copied DEINIT_TYPE pkt current->tgid: %d\n",
-			current->tgid);
 		driver->data_ready[index] ^= DEINIT_TYPE;
 		atomic_dec(&driver->data_ready_notif[index]);
 		mutex_unlock(&driver->diagchar_mutex);
@@ -4306,7 +4249,7 @@ static void diag_debug_init(void)
 	 * to be logged to IPC
 	 */
 	diag_debug_mask = DIAG_DEBUG_PERIPHERALS | DIAG_DEBUG_DCI |
-		DIAG_DEBUG_MHI | DIAG_DEBUG_USERSPACE | DIAG_DEBUG_BRIDGE;
+				DIAG_DEBUG_USERSPACE | DIAG_DEBUG_BRIDGE;
 }
 #else
 static void diag_debug_init(void)

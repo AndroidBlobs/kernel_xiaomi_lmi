@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
-/* Copyright (c) 2008-2020, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2008-2019, The Linux Foundation. All rights reserved.
+ * Copyright (C) 2020 XiaoMi, Inc.
  */
 
 #include <linux/slab.h>
@@ -1367,7 +1368,7 @@ static int diag_cmd_set_all_msg_mask(unsigned char *src_buf, int src_len,
 			info = diag_md_session_get_peripheral(DIAG_LOCAL_PROC,
 								APPS_DATA);
 			ret_val = diag_save_user_msg_mask(info);
-			if (ret_val < 0)
+			if (ret_val)
 				pr_err("diag: unable to save msg mask to update userspace clients err:%d\n",
 					ret_val);
 			mutex_unlock(&driver->md_session_lock);
@@ -3502,7 +3503,6 @@ static int __diag_multisim_mask_init(struct diag_mask_info *mask_info,
 		int mask_len, int subid_index)
 {
 	struct diag_multisim_masks *temp = NULL;
-	struct diag_multisim_masks *ms_ptr = NULL;
 
 	if (!mask_info || mask_len <= 0 || subid_index < 0)
 		return -EINVAL;
@@ -3522,10 +3522,9 @@ static int __diag_multisim_mask_init(struct diag_mask_info *mask_info,
 		temp->next = NULL;
 
 		if (mask_info->ms_ptr) {
-			ms_ptr = mask_info->ms_ptr;
-			while (ms_ptr->next)
-				ms_ptr = ms_ptr->next;
-			ms_ptr->next = temp;
+			while (mask_info->ms_ptr->next)
+				mask_info->ms_ptr = mask_info->ms_ptr->next;
+			mask_info->ms_ptr->next = temp;
 		} else {
 			mask_info->ms_ptr = temp;
 		}
