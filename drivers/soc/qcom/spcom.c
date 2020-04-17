@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
- * Copyright (c) 2015-2020, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2015-2019, The Linux Foundation. All rights reserved.
+ * Copyright (C) 2020 XiaoMi, Inc.
  */
 
 /*
@@ -234,7 +235,6 @@ struct spcom_device {
 
 	int32_t nvm_ion_fd;
 	struct mutex ioctl_lock;
-	struct mutex create_channel_lock;
 };
 
 /* Device Driver State */
@@ -617,9 +617,6 @@ static int spcom_local_powerup(const struct subsys_desc *subsys)
 			spcom_sp2soc_pbldone_mask|spcom_sp2soc_initdone_mask,
 			regs);
 		iounmap(regs);
-	} else {
-		pr_err("PBL has returned an error= 0x%x. Not sending sw_init_done\n",
-			pbl_status_reg);
 	}
 
 	iounmap(err_regs);
@@ -1261,13 +1258,6 @@ static int spcom_handle_write(struct spcom_channel *ch,
 		return -EINVAL;
 	}
 
-	if (cmd_id == SPCOM_CMD_SEND || cmd_id == SPCOM_CMD_SEND_MODIFIED) {
-		if (!spcom_is_channel_connected(ch)) {
-			pr_err("ch [%s] remote side not connected\n", ch->name);
-			return -ENOTCONN;
-		}
-	}
-
 	switch (cmd_id) {
 	case SPCOM_CMD_SEND:
 		if (ch->is_sharable) {
@@ -1725,6 +1715,12 @@ static ssize_t spcom_device_write(struct file *filp,
 			return -EINVAL;
 		}
 		pr_debug("control device - no channel context\n");
+	} else {
+		/* Check if remote side connect */
+		if (!spcom_is_channel_connected(ch)) {
+			pr_err("ch [%s] remote side not connect\n", ch->name);
+			return -ENOTCONN;
+		}
 	}
 	buf_size = size; /* explicit casting size_t to int */
 	buf = kzalloc(size, GFP_KERNEL);
@@ -1984,26 +1980,22 @@ static int spcom_create_channel_chardev(const char *name, bool is_sharable)
 	struct cdev *cdev;
 
 	pr_debug("Add channel [%s]\n", name);
-	mutex_lock(&spcom_dev->create_channel_lock);
 
 	ch = spcom_find_channel_by_name(name);
 	if (ch) {
 		pr_err("channel [%s] already exist\n", name);
-		mutex_unlock(&spcom_dev->create_channel_lock);
 		return -EBUSY;
 	}
 
 	ch = spcom_find_channel_by_name(""); /* find reserved channel */
 	if (!ch) {
 		pr_err("no free channel\n");
-		mutex_unlock(&spcom_dev->create_channel_lock);
 		return -ENODEV;
 	}
 
 	ret = spcom_init_channel(ch, is_sharable, name);
 	if (ret < 0) {
 		pr_err("can't init channel %d\n", ret);
-		mutex_unlock(&spcom_dev->create_channel_lock);
 		return ret;
 	}
 
@@ -2042,7 +2034,6 @@ static int spcom_create_channel_chardev(const char *name, bool is_sharable)
 	ch->cdev = cdev;
 	ch->dev = dev;
 	mutex_unlock(&ch->lock);
-	mutex_unlock(&spcom_dev->create_channel_lock);
 
 	return 0;
 
@@ -2059,7 +2050,6 @@ exit_destroy_channel:
 	mutex_lock(&ch->lock);
 	memset(ch->name, 0, SPCOM_CHANNEL_NAME_SIZE);
 	mutex_unlock(&ch->lock);
-	mutex_unlock(&spcom_dev->create_channel_lock);
 	return -EFAULT;
 }
 
@@ -2521,7 +2511,6 @@ static int spcom_probe(struct platform_device *pdev)
 	spin_lock_init(&spcom_dev->rx_lock);
 	spcom_dev->nvm_ion_fd = -1;
 	mutex_init(&spcom_dev->ioctl_lock);
-	mutex_init(&spcom_dev->create_channel_lock);
 
 	ret = spcom_register_chardev();
 	if (ret) {

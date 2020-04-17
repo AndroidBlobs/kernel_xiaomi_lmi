@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
-/* Copyright (c) 2018-2020, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2018-2019, The Linux Foundation. All rights reserved.
+ * Copyright (C) 2020 XiaoMi, Inc.
  */
 
 #include <linux/kernel.h>
@@ -118,7 +119,7 @@ static int fsa4480_usbc_event_changed(struct notifier_block *nb,
 		dev_dbg(dev, "%s: queueing usbc_analog_work\n",
 			__func__);
 		pm_stay_awake(fsa_priv->dev);
-		queue_work(system_freezable_wq, &fsa_priv->usbc_analog_work);
+		schedule_work(&fsa_priv->usbc_analog_work);
 		break;
 	default:
 		break;
@@ -147,8 +148,8 @@ static int fsa4480_usbc_analog_setup_switches(struct fsa4480_priv *fsa_priv)
 			__func__, rc);
 		goto done;
 	}
-	dev_dbg(dev, "%s: setting GPIOs active = %d\n",
-		__func__, mode.intval != POWER_SUPPLY_TYPEC_NONE);
+	dev_info(dev, "%s: setting GPIOs active = %d, mode.intval = %d\n",
+		__func__, mode.intval != POWER_SUPPLY_TYPEC_NONE, mode.intval);
 
 	switch (mode.intval) {
 	/* add all modes FSA should notify for in here */
@@ -228,11 +229,8 @@ EXPORT_SYMBOL(fsa4480_reg_notifier);
 int fsa4480_unreg_notifier(struct notifier_block *nb,
 			     struct device_node *node)
 {
-	int rc = 0;
 	struct i2c_client *client = of_find_i2c_device_by_node(node);
 	struct fsa4480_priv *fsa_priv;
-	struct device *dev;
-	union power_supply_propval mode;
 
 	if (!client)
 		return -EINVAL;
@@ -240,27 +238,10 @@ int fsa4480_unreg_notifier(struct notifier_block *nb,
 	fsa_priv = (struct fsa4480_priv *)i2c_get_clientdata(client);
 	if (!fsa_priv)
 		return -EINVAL;
-	dev = fsa_priv->dev;
-	if (!dev)
-		return -EINVAL;
 
-	mutex_lock(&fsa_priv->notification_lock);
-	/* get latest mode within locked context */
-	rc = power_supply_get_property(fsa_priv->usb_psy,
-			POWER_SUPPLY_PROP_TYPEC_MODE, &mode);
-	if (rc) {
-		dev_dbg(dev, "%s: Unable to read USB TYPEC_MODE: %d\n",
-			__func__, rc);
-		goto done;
-	}
-	/* Do not reset switch settings for usb digital hs */
-	if (mode.intval != POWER_SUPPLY_TYPEC_SINK)
-		fsa4480_usbc_update_settings(fsa_priv, 0x18, 0x98);
-	rc = blocking_notifier_chain_unregister
+	fsa4480_usbc_update_settings(fsa_priv, 0x18, 0x98);
+	return blocking_notifier_chain_unregister
 					(&fsa_priv->fsa4480_notifier, nb);
-done:
-	mutex_unlock(&fsa_priv->notification_lock);
-	return rc;
 }
 EXPORT_SYMBOL(fsa4480_unreg_notifier);
 
@@ -311,7 +292,7 @@ int fsa4480_switch_event(struct device_node *node,
 		else
 			switch_control = 0x7;
 		fsa4480_usbc_update_settings(fsa_priv, switch_control, 0x9F);
-		break;
+		return 1;
 	case FSA_USBC_ORIENTATION_CC1:
 		fsa4480_usbc_update_settings(fsa_priv, 0x18, 0xF8);
 		return fsa4480_validate_display_port_settings(fsa_priv);

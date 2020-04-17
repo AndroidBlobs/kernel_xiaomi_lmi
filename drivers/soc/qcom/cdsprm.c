@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright (c) 2018-2019, The Linux Foundation. All rights reserved.
+ * Copyright (C) 2020 XiaoMi, Inc.
  */
 
 /*
@@ -534,7 +535,7 @@ static void process_delayed_rm_request(struct work_struct *work)
 			(curr_timestamp < timestamp)) {
 		if ((timestamp - curr_timestamp) <
 		(gcdsprm.qos_max_ms * SYS_CLK_TICKS_PER_MS))
-			time_ms = ((unsigned int)(timestamp - curr_timestamp)) /
+			time_ms = (timestamp - curr_timestamp) /
 						SYS_CLK_TICKS_PER_MS;
 		else
 			break;
@@ -850,9 +851,6 @@ static int cdsp_get_cur_state(struct thermal_cooling_device *cdev,
 static int cdsp_set_cur_state(struct thermal_cooling_device *cdev,
 				unsigned long state)
 {
-	if (state > CDSP_THERMAL_MAX_STATE)
-		return -EINVAL;
-
 	if (gcdsprm.thermal_cdsp_level == state)
 		return 0;
 
@@ -886,9 +884,6 @@ static int hvx_get_cur_state(struct thermal_cooling_device *cdev,
 static int hvx_set_cur_state(struct thermal_cooling_device *cdev,
 				unsigned long state)
 {
-	if (state > HVX_THERMAL_MAX_STATE)
-		return -EINVAL;
-
 	if (gcdsprm.thermal_hvx_level == state)
 		return 0;
 

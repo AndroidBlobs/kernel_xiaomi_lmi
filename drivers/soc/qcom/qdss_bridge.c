@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
- * Copyright (c) 2017-2020, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2017-2019, The Linux Foundation. All rights reserved.
  */
 
 #define KMSG_COMPONENT "QDSS diag bridge"
@@ -108,7 +108,6 @@ static int qdss_create_buf_tbl(struct qdss_bridge_drvdata *drvdata)
 
 		buf = kzalloc(drvdata->mtu, GFP_KERNEL);
 		usb_req = kzalloc(sizeof(*usb_req), GFP_KERNEL);
-		init_completion(&usb_req->write_done);
 
 		entry->buf = buf;
 		entry->usb_req = usb_req;
@@ -209,6 +208,7 @@ static void qdss_buf_tbl_remove(struct qdss_bridge_drvdata *drvdata,
 static void mhi_ch_close(struct qdss_bridge_drvdata *drvdata)
 {
 	if (drvdata->mode == MHI_TRANSFER_TYPE_USB) {
+		flush_workqueue(drvdata->mhi_wq);
 		qdss_destroy_buf_tbl(drvdata);
 		qdss_destroy_read_done_list(drvdata);
 	} else if (drvdata->mode == MHI_TRANSFER_TYPE_UCI) {
@@ -256,7 +256,6 @@ static ssize_t mode_store(struct device *dev,
 				spin_unlock_bh(&drvdata->lock);
 				usb_qdss_close(drvdata->usb_ch);
 				mhi_unprepare_from_transfer(drvdata->mhi_dev);
-				flush_workqueue(drvdata->mhi_wq);
 				mhi_ch_close(drvdata);
 				drvdata->mode = MHI_TRANSFER_TYPE_UCI;
 			} else if (drvdata->opened == DISABLE) {
@@ -276,7 +275,6 @@ static ssize_t mode_store(struct device *dev,
 				spin_unlock_bh(&drvdata->lock);
 				wake_up(&drvdata->uci_wq);
 				mhi_unprepare_from_transfer(drvdata->mhi_dev);
-				flush_workqueue(drvdata->mhi_wq);
 				mhi_ch_close(drvdata);
 				drvdata->mode = MHI_TRANSFER_TYPE_USB;
 				queue_work(drvdata->mhi_wq,
@@ -460,8 +458,7 @@ static void usb_notifier(void *priv, unsigned int event,
 		break;
 
 	case USB_QDSS_DISCONNECT:
-		if (drvdata->opened == ENABLE)
-			usb_qdss_free_req(drvdata->usb_ch);
+		/* Leave MHI/USB open.Only close on MHI disconnect */
 		break;
 
 	case USB_QDSS_DATA_WRITE_DONE:
@@ -589,7 +586,6 @@ static int mhi_uci_release(struct inode *inode, struct file *file)
 			spin_unlock_bh(&drvdata->lock);
 			wake_up(&drvdata->uci_wq);
 			mhi_unprepare_from_transfer(drvdata->mhi_dev);
-			flush_workqueue(drvdata->mhi_wq);
 			mhi_ch_close(drvdata);
 		} else if (drvdata->opened == SSR) {
 			spin_unlock_bh(&drvdata->lock);
@@ -829,7 +825,6 @@ static void qdss_mhi_remove(struct mhi_device *mhi_dev)
 				msleep(20);
 			} while (qdss_check_entry(drvdata));
 		}
-		flush_workqueue(drvdata->mhi_wq);
 		mhi_ch_close(drvdata);
 	} else
 		spin_unlock_bh(&drvdata->lock);

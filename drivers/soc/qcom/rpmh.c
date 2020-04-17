@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
  * Copyright (c) 2016-2019, The Linux Foundation. All rights reserved.
+ * Copyright (C) 2020 XiaoMi, Inc.
  */
 
 #include <linux/atomic.h>
@@ -66,7 +67,7 @@ struct cache_req {
 struct batch_cache_req {
 	struct list_head list;
 	int count;
-	struct rpmh_request *rpm_msgs;
+	struct rpmh_request rpm_msgs[];
 };
 
 static struct rpmh_ctrlr *get_rpmh_ctrlr(const struct device *dev)
@@ -175,27 +176,20 @@ static struct cache_req *cache_rpm_request(struct rpmh_ctrlr *ctrlr,
 existing:
 	switch (state) {
 	case RPMH_ACTIVE_ONLY_STATE:
-		if (req->sleep_val != UINT_MAX) {
+		if (req->sleep_val != UINT_MAX)
 			req->wake_val = cmd->data;
-			ctrlr->dirty = true;
-		}
 		break;
 	case RPMH_WAKE_ONLY_STATE:
-		if (req->wake_val != cmd->data) {
-			req->wake_val = cmd->data;
-			ctrlr->dirty = true;
-		}
+		req->wake_val = cmd->data;
 		break;
 	case RPMH_SLEEP_STATE:
-		if (req->sleep_val != cmd->data) {
-			req->sleep_val = cmd->data;
-			ctrlr->dirty = true;
-		}
+		req->sleep_val = cmd->data;
 		break;
 	default:
 		break;
 	}
 
+	ctrlr->dirty = true;
 unlock:
 	spin_unlock(&ctrlr->cache_lock);
 
@@ -333,12 +327,14 @@ int rpmh_write(const struct device *dev, enum rpmh_state state,
 	ret = __rpmh_write(dev, state, &rpm_msg);
 	if (ret)
 		return ret;
-
-	ret = wait_for_completion_timeout(&compl, RPMH_TIMEOUT_MS);
-	if (!ret) {
-		rpmh_rsc_debug(ctrlr_to_drv(ctrlr));
-		return -ETIMEDOUT;
-	}
+	if (!oops_in_progress) {
+		ret = wait_for_completion_timeout(&compl, RPMH_TIMEOUT_MS);
+		if (!ret) {
+			rpmh_rsc_debug(ctrlr_to_drv(ctrlr));
+			return -ETIMEDOUT;
+		}
+	} else
+		mdelay(100);
 
 	return 0;
 }
@@ -380,10 +376,8 @@ static void invalidate_batch(struct rpmh_ctrlr *ctrlr)
 	struct batch_cache_req *req, *tmp;
 
 	spin_lock(&ctrlr->cache_lock);
-	list_for_each_entry_safe(req, tmp, &ctrlr->batch_cache, list) {
-		list_del(&req->list);
+	list_for_each_entry_safe(req, tmp, &ctrlr->batch_cache, list)
 		kfree(req);
-	}
 	INIT_LIST_HEAD(&ctrlr->batch_cache);
 	spin_unlock(&ctrlr->cache_lock);
 }
@@ -439,11 +433,10 @@ int rpmh_write_batch(const struct device *dev, enum rpmh_state state,
 		return -ENOMEM;
 
 	req = ptr;
-	rpm_msgs = ptr + sizeof(*req);
 	compls = ptr + sizeof(*req) + count * sizeof(*rpm_msgs);
 
 	req->count = count;
-	req->rpm_msgs = rpm_msgs;
+	rpm_msgs = req->rpm_msgs;
 
 	for (i = 0; i < count; i++) {
 		__fill_rpmh_msg(rpm_msgs + i, state, cmd, n[i]);
@@ -470,17 +463,20 @@ int rpmh_write_batch(const struct device *dev, enum rpmh_state state,
 
 	time_left = RPMH_TIMEOUT_MS;
 	while (i--) {
-		time_left = wait_for_completion_timeout(&compls[i], time_left);
-		if (!time_left) {
-			/*
-			 * Better hope they never finish because they'll signal
-			 * the completion that we're going to free once
-			 * we've returned from this function.
-			 */
-			rpmh_rsc_debug(ctrlr_to_drv(ctrlr));
-			ret = -ETIMEDOUT;
-			goto exit;
-		}
+		if (!oops_in_progress) {
+			time_left = wait_for_completion_timeout(&compls[i], time_left);
+			if (!time_left) {
+				/*
+				 * Better hope they never finish because they'll signal
+				 * the completion that we're going to free once
+				 * we've returned from this function.
+				 */
+				rpmh_rsc_debug(ctrlr_to_drv(ctrlr));
+				ret = -ETIMEDOUT;
+				goto exit;
+			}
+		} else
+			mdelay(100);
 	}
 
 exit:
